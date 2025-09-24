@@ -594,12 +594,15 @@ fn benchmark_container(
 fn optimize_container(
     input: PathBuf,
     output: PathBuf,
-    _recompress: bool,
+    recompress: bool,
     zero_copy: bool,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
         println!("优化容器: {:?} -> {:?}", input, output);
+        if recompress {
+            println!("启用重压缩优化");
+        }
     }
     
     let data = fs::read(&input)
@@ -608,7 +611,7 @@ fn optimize_container(
     let original_size = data.len();
     
     // 根据选项选择反序列化方法
-    let container = if zero_copy {
+    let mut container = if zero_copy {
         if verbose {
             println!("使用零拷贝反序列化");
         }
@@ -627,10 +630,96 @@ fn optimize_container(
         println!("平均压缩比: {:.2}", stats.average_compression_ratio);
     }
     
-    let optimized_container = container;
+    // 执行实际的优化
+    let mut total_original_compressed: u64 = 0;
+    let mut total_final_compressed: u64 = 0;
+    let mut total_improvement_bytes: u64 = 0;
+    let mut optimized_chunks = 0;
+    let mut structural_stats = Vec::new();
+    
+    if recompress {
+        if verbose {
+            println!("\n开始重压缩优化...");
+        }
+        
+        for (i, chunk) in container.chunks.iter_mut().enumerate() {
+            let original_compressed = chunk.compressed_size;
+            total_original_compressed += original_compressed as u64;
+            
+            // 尝试重压缩（最小改进64字节）
+            match chunk.try_recompress(64) {
+                Ok(compression_stats) => {
+                    total_final_compressed += compression_stats.final_size as u64;
+                    
+                    if compression_stats.improvement_bytes > 0 {
+                        optimized_chunks += 1;
+                        total_improvement_bytes += compression_stats.improvement_bytes as u64;
+                        
+                        if verbose {
+                            println!("块{}: {} -> {} 字节 ({:.1}% 减少, 测试了{}个级别)", 
+                                i,
+                                compression_stats.original_size,
+                                compression_stats.final_size,
+                                compression_stats.improvement_ratio,
+                                compression_stats.levels_tested.len()
+                            );
+                        }
+                    } else {
+                        if verbose && i < 5 { // 只显示前几个未优化的块信息
+                            println!("块{}: 无改进机会 ({} 字节)", i, original_compressed);
+                        }
+                    }
+                    
+                    // 收集结构化开销统计
+                    if i < 10 { // 只分析前10个块的开销
+                        let overhead = chunk.get_structural_overhead();
+                        structural_stats.push(overhead);
+                    }
+                }
+                Err(e) => {
+                    if verbose {
+                        println!("块{} 重压缩失败: {}", i, e);
+                    }
+                    total_final_compressed += original_compressed as u64;
+                }
+            }
+        }
+        
+        if verbose {
+            println!("\n压缩优化结果:");
+            println!("  优化的块数: {}/{}", optimized_chunks, container.chunks.len());
+            println!("  原始压缩总大小: {:.2} KB", total_original_compressed as f64 / 1024.0);
+            println!("  最终压缩总大小: {:.2} KB", total_final_compressed as f64 / 1024.0);
+            println!("  压缩改进: {} 字节 ({:.1}%)", 
+                total_improvement_bytes,
+                if total_original_compressed > 0 {
+                    total_improvement_bytes as f64 / total_original_compressed as f64 * 100.0
+                } else { 0.0 }
+            );
+            
+            // 显示结构化开销分析
+            if !structural_stats.is_empty() {
+                println!("\n结构化开销分析(前{}个块):", structural_stats.len());
+                let avg_metadata_ratio: f64 = structural_stats.iter()
+                    .map(|s| s.metadata_ratio)
+                    .sum::<f64>() / structural_stats.len() as f64;
+                let avg_header_bytes = structural_stats.iter()
+                    .map(|s| s.header_bytes)
+                    .sum::<u32>() / structural_stats.len() as u32;
+                
+                println!("  平均元数据开销: {:.1}%", avg_metadata_ratio);
+                println!("  平均头部大小: {} 字节", avg_header_bytes);
+            }
+        }
+    } else {
+        // 没有启用重压缩，只复制现有压缩大小
+        total_final_compressed = container.chunks.iter()
+            .map(|c| c.compressed_size as u64)
+            .sum();
+    }
     
     // 序列化优化后的容器
-    let optimized_data = optimized_container.serialize()?;
+    let optimized_data = container.serialize()?;
     let optimized_size = optimized_data.len();
     
     // 写入输出文件

@@ -125,13 +125,29 @@ impl Codec {
     /// 
     /// 压缩后的数据
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        self.compress_with_level(data, None)
+    }
+
+    /// 使用指定压缩级别压缩数据
+    /// 
+    /// # 参数
+    /// 
+    /// * `data` - 要压缩的数据
+    /// * `level` - 可选的压缩级别。None表示使用默认级别
+    /// 
+    /// # 返回
+    /// 
+    /// 压缩后的数据
+    pub fn compress_with_level(&self, data: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
         match self {
             Codec::None => Ok(data.to_vec()),
             Codec::Zstd => {
-                zstd::bulk::compress(data, 3)
-                    .map_err(|e| UnivError::compression_error(format!("Zstd压缩失败: {}", e)))
+                let compression_level = level.unwrap_or(3);
+                zstd::bulk::compress(data, compression_level)
+                    .map_err(|e| UnivError::compression_error(format!("Zstd压缩失败(级别{}): {}", compression_level, e)))
             }
             Codec::Lz4 => {
+                // LZ4不支持压缩级别调整，忽略level参数
                 Ok(lz4_flex::compress_prepend_size(data))
             }
             Codec::Deflate => {
@@ -139,7 +155,11 @@ impl Codec {
                 use flate2::Compression;
                 use std::io::Write;
                 
-                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                let compression_level = match level {
+                    Some(l) => Compression::new(l.clamp(0, 9) as u32),
+                    None => Compression::default(),
+                };
+                let mut encoder = DeflateEncoder::new(Vec::new(), compression_level);
                 encoder.write_all(data)
                     .map_err(|e| UnivError::compression_error(format!("Deflate压缩写入失败: {}", e)))?;
                 encoder.finish()
@@ -241,6 +261,49 @@ impl SharedBuffer {
 /// 
 /// 使用固定数组避免小哈希值的堆分配，提高缓存局部性
 type ContentHash = SmallVec<[u8; 32]>;
+
+/// 压缩级别测试统计
+#[derive(Debug, Clone)]
+pub struct CompressionLevelStats {
+    /// 压缩级别
+    pub level: i32,
+    /// 压缩后大小
+    pub compressed_size: u32,
+    /// 相比原始的改进字节数
+    pub improvement_bytes: u32,
+}
+
+/// 压缩优化统计信息
+#[derive(Debug, Clone)]
+pub struct CompressionStats {
+    /// 原始压缩大小
+    pub original_size: u32,
+    /// 最终压缩大小
+    pub final_size: u32,
+    /// 改进的字节数
+    pub improvement_bytes: u32,
+    /// 改进百分比
+    pub improvement_ratio: f64,
+    /// 测试的级别统计
+    pub levels_tested: Vec<CompressionLevelStats>,
+}
+
+/// 结构化开销分析
+#[derive(Debug, Clone)]
+pub struct StructuralOverhead {
+    /// 块头部字节数
+    pub header_bytes: u32,
+    /// 哈希相关字节数
+    pub hash_bytes: u32,
+    /// CRC校验字节数
+    pub crc_bytes: u32,
+    /// 总元数据字节数
+    pub total_metadata_bytes: u32,
+    /// 载荷数据字节数
+    pub payload_bytes: u32,
+    /// 元数据占比百分比
+    pub metadata_ratio: f64,
+}
 
 /// 流式哈希验证器
 /// 
@@ -844,6 +907,105 @@ impl Chunk {
         CHUNK_FRAME_HEADER_SIZE + 1 + self.content_hash.len() + 2 + 
         self.payload.len() + CHUNK_FRAME_CRC_SIZE
     }
+
+    /// 尝试重新压缩以获得更好的压缩比
+    /// 
+    /// 使用不同的压缩级别探测最佳压缩效果，只在有收益时应用变更
+    /// 
+    /// # 参数
+    /// 
+    /// * `min_improvement_bytes` - 最小改进字节数，小于此值不应用优化
+    /// 
+    /// # 返回
+    /// 
+    /// 返回压缩统计信息的Result
+    pub fn try_recompress(&mut self, min_improvement_bytes: u32) -> Result<CompressionStats> {
+        // 获取原始数据
+        let raw_data = self.get_raw_data()?;
+        let original_compressed_size = self.compressed_size;
+        
+        let mut best_compressed_data = self.payload.to_bytes().to_vec();
+        let mut best_size = self.compressed_size;
+        let mut _best_level = None; // Track best level for potential future use
+        let mut stats = CompressionStats {
+            original_size: original_compressed_size,
+            final_size: original_compressed_size,
+            improvement_bytes: 0,
+            improvement_ratio: 0.0,
+            levels_tested: Vec::new(),
+        };
+
+        // 根据编解码器选择压缩级别范围
+        let levels_to_test = match self.codec {
+            Codec::Zstd => vec![1, 3, 6, 9, 12, 15, 19, 22], // Zstd支持1-22级别
+            Codec::Deflate => vec![1, 3, 6, 9], // Deflate支持0-9级别
+            Codec::Lz4 | Codec::None => vec![], // LZ4和None不支持级别调整
+            Codec::Unknown(_) => vec![],
+        };
+
+        // 尝试不同的压缩级别
+        for level in levels_to_test {
+            match self.codec.compress_with_level(&raw_data, Some(level)) {
+                Ok(compressed_data) => {
+                    let size = compressed_data.len() as u32;
+                    stats.levels_tested.push(CompressionLevelStats {
+                        level,
+                        compressed_size: size,
+                        improvement_bytes: original_compressed_size.saturating_sub(size),
+                    });
+                    
+                    if size < best_size {
+                        best_compressed_data = compressed_data;
+                        best_size = size;
+                        _best_level = Some(level);
+                    }
+                }
+                Err(_) => {
+                    // 压缩失败，跳过这个级别
+                    continue;
+                }
+            }
+        }
+
+        // 只有在改进超过最小阈值时才应用
+        let improvement = original_compressed_size.saturating_sub(best_size);
+        if improvement >= min_improvement_bytes && best_size < original_compressed_size {
+            // 应用最佳压缩结果
+            self.compressed_size = best_size;
+            self.payload = ChunkPayload::Owned(Bytes::from(best_compressed_data));
+            
+            stats.final_size = best_size;
+            stats.improvement_bytes = improvement;
+            stats.improvement_ratio = improvement as f64 / original_compressed_size as f64 * 100.0;
+        }
+
+        Ok(stats)
+    }
+
+    /// 获取块的结构化开销信息
+    /// 
+    /// # 返回
+    /// 
+    /// 块的结构开销分析
+    pub fn get_structural_overhead(&self) -> StructuralOverhead {
+        let header_size = CHUNK_FRAME_HEADER_SIZE;
+        let hash_size = 1 + self.content_hash.len() + 2; // hash_alg + len + hash_bytes + len_field
+        let crc_size = CHUNK_FRAME_CRC_SIZE;
+        let total_metadata_size = header_size + hash_size + crc_size;
+        
+        StructuralOverhead {
+            header_bytes: header_size as u32,
+            hash_bytes: hash_size as u32,
+            crc_bytes: crc_size as u32,
+            total_metadata_bytes: total_metadata_size as u32,
+            payload_bytes: self.compressed_size,
+            metadata_ratio: if self.compressed_size > 0 {
+                total_metadata_size as f64 / (total_metadata_size + self.compressed_size as usize) as f64 * 100.0
+            } else {
+                100.0
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -971,6 +1133,96 @@ mod tests {
         assert!(chunk.has_transform(transform_flags::DICT_STRING));
         assert!(chunk.has_transform(transform_flags::INTEGER_VARINT));
         assert!(!chunk.has_transform(transform_flags::COLUMNARIZE));
+    }
+
+    #[test]
+    fn test_compression_optimization() {
+        // 创建一个测试数据块，内容足够大以便压缩有效果
+        let test_data = b"This is a test string that should compress reasonably well with zstd compression. \
+                         It contains repeated patterns and should benefit from higher compression levels. \
+                         The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.";
+        
+        let mut chunk = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::Zstd,
+            0,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        let original_compressed_size = chunk.compressed_size;
+        
+        // 尝试重压缩优化
+        let compression_stats = chunk.try_recompress(1).unwrap(); // 1字节最小改进
+        
+        // 验证统计信息
+        assert_eq!(compression_stats.original_size, original_compressed_size);
+        assert!(!compression_stats.levels_tested.is_empty());
+        
+        // 验证块数据完整性
+        let raw_data = chunk.get_raw_data().unwrap();
+        assert_eq!(raw_data, test_data);
+        
+        println!("原始压缩: {} 字节", original_compressed_size);
+        println!("优化后压缩: {} 字节", compression_stats.final_size);
+        println!("改进: {} 字节 ({:.1}%)", 
+                 compression_stats.improvement_bytes,
+                 compression_stats.improvement_ratio);
+    }
+
+    #[test]
+    fn test_structural_overhead_analysis() {
+        let test_data = b"Small test data";
+        
+        let chunk = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::Zstd,
+            0,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        let overhead = chunk.get_structural_overhead();
+        
+        // 验证开销分析的合理性
+        assert!(overhead.header_bytes > 0);
+        assert!(overhead.hash_bytes > 0);
+        assert!(overhead.crc_bytes > 0);
+        assert!(overhead.payload_bytes > 0);
+        assert!(overhead.metadata_ratio >= 0.0 && overhead.metadata_ratio <= 100.0);
+        
+        println!("结构化开销分析:");
+        println!("  头部: {} 字节", overhead.header_bytes);
+        println!("  哈希: {} 字节", overhead.hash_bytes);
+        println!("  CRC: {} 字节", overhead.crc_bytes);
+        println!("  载荷: {} 字节", overhead.payload_bytes);
+        println!("  元数据占比: {:.1}%", overhead.metadata_ratio);
+    }
+
+    #[test]
+    fn test_codec_compression_levels() {
+        let data = b"Test data for compression level testing with repeated patterns and content.";
+        
+        let zstd_codec = Codec::Zstd;
+        
+        // 测试不同压缩级别
+        let level1 = zstd_codec.compress_with_level(data, Some(1)).unwrap();
+        let level9 = zstd_codec.compress_with_level(data, Some(9)).unwrap();
+        let level19 = zstd_codec.compress_with_level(data, Some(19)).unwrap();
+        
+        // 验证解压缩正确性
+        let decompressed1 = zstd_codec.decompress(&level1, Some(data.len())).unwrap();
+        let decompressed9 = zstd_codec.decompress(&level9, Some(data.len())).unwrap();
+        let decompressed19 = zstd_codec.decompress(&level19, Some(data.len())).unwrap();
+        
+        assert_eq!(decompressed1, data);
+        assert_eq!(decompressed9, data);
+        assert_eq!(decompressed19, data);
+        
+        println!("压缩级别测试:");
+        println!("  级别1: {} 字节", level1.len());
+        println!("  级别9: {} 字节", level9.len());
+        println!("  级别19: {} 字节", level19.len());
     }
 }
 
