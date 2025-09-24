@@ -230,7 +230,7 @@ impl ReferenceGraph {
                 // 更新反向引用
                 self.reverse_references
                     .entry(reference.target_id.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(node_id.clone());
             }
         }

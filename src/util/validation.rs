@@ -349,7 +349,7 @@ impl StringValidator {
         parts.iter().all(|part| {
             !part.is_empty() && 
             part.chars().all(|c| c.is_alphanumeric() || c == '-') &&
-            part.chars().next().map_or(false, |c| c.is_alphabetic())
+            part.chars().next().is_some_and(|c| c.is_alphabetic())
         })
     }
 }

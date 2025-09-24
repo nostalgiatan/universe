@@ -292,7 +292,7 @@ impl Header {
             });
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
         let original_len = buf.len();
 
         // 读取并验证魔数
@@ -390,7 +390,7 @@ impl Header {
             buf = &buf[1..];
 
             // 读取扩展长度
-            let mut ext_len_buf = &buf[..];
+            let mut ext_len_buf = buf;
             let ext_len = leb128::read::unsigned(&mut ext_len_buf)
                 .map_err(|e| UnivError::deserialization_error(format!("LEB128解码失败: {}", e)))?;
             let _len_bytes = buf.len() - ext_len_buf.len();

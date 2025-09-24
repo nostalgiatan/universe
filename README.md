@@ -18,7 +18,7 @@ UNIV 是一个统一的二进制容器格式的 Rust 实现，支持多种数据
 
 ```toml
 [dependencies]
-universe = "1.0.0-draft"
+universe = "1.0.0"
 ```
 
 ### 基本使用
@@ -115,6 +115,18 @@ universe/
 # 运行基础使用示例
 cargo run --example basic_usage
 
+# 使用CLI工具创建容器
+cargo run --bin cil -- create -o example.univ --producer "MyApp" --namespace "com.example"
+
+# 查看容器信息
+cargo run --bin cil -- info example.univ --chunks --toc
+
+# 验证容器完整性
+cargo run --bin cil -- verify example.univ --strict
+
+# 提取容器数据
+cargo run --bin cil -- extract example.univ -o extracted/
+
 # 运行所有测试
 cargo test
 
@@ -122,12 +134,24 @@ cargo test
 cargo doc --open
 ```
 
+## CLI 工具 (CIL)
+
+本项目包含了官方的命令行工具 `cil`，提供完整的 UNIV 容器操作功能：
+
+- **create**: 创建各种 Profile 类型的容器
+- **info**: 查看容器详细信息
+- **verify**: 验证容器完整性和规范符合性  
+- **extract**: 提取容器中的数据块
+
+使用 `cargo run --bin cil -- --help` 查看详细帮助信息。
+
 ## 测试覆盖
 
-- ✅ **61个单元测试**全部通过
+- ✅ **75个单元测试**全部通过（包含CLI测试）
 - ✅ **7个文档测试**全部通过
 - ✅ 覆盖所有核心功能模块
 - ✅ 包含错误处理和边界条件测试
+- ✅ CLI工具集成测试覆盖
 
 ## 依赖项
 

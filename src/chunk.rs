@@ -362,7 +362,7 @@ impl Chunk {
             });
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
         let original_len = buf.len();
 
         // 验证帧头
