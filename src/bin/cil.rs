@@ -475,7 +475,7 @@ fn extract_container_data(
         
         let chunk = container.get_chunk(index).unwrap();
         let chunk_data = if raw {
-            chunk.payload.to_vec()
+            chunk.payload.to_bytes().to_vec()
         } else {
             chunk.get_raw_data()?
         };

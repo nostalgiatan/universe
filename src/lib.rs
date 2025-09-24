@@ -50,6 +50,8 @@ pub mod reference;
 pub mod security;
 pub mod util;
 
+use std::sync::Arc;
+
 // 重新导出主要类型
 pub use error::{UnivError, Result};
 pub use header::Header;
@@ -128,6 +130,72 @@ impl Container {
             }
             
             let (chunk, chunk_size) = Chunk::deserialize(remaining)?;
+            chunks.push(chunk);
+            offset += chunk_size;
+        }
+        
+        // 3. 解析TOC（如果存在）
+        let toc = if offset < data.len() {
+            let remaining = &data[offset..];
+            // TOC 现在是直接的 CBOR 数据，不是以 "TOC1" 开头
+            // 尝试解析剩余数据为 TOC
+            if !remaining.is_empty() {
+                toc::Toc::deserialize(remaining).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        Ok(Self {
+            header,
+            chunks,
+            toc,
+        })
+    }
+
+    /// 零拷贝反序列化容器（性能优化版本）
+    /// 
+    /// 使用共享缓冲区避免压缩数据的重复复制，显著减少内存开销
+    /// 
+    /// # 参数
+    /// 
+    /// * `data` - 要解析的字节数据
+    /// 
+    /// # 返回
+    /// 
+    /// 成功时返回解析后的容器，失败时返回错误
+    pub fn deserialize_zero_copy(data: &[u8]) -> Result<Self> {
+        if data.is_empty() {
+            return Err(UnivError::IncompleteData { 
+                expected: 1, 
+                actual: 0 
+            });
+        }
+        
+        // 创建共享缓冲区
+        let shared_buffer: Arc<[u8]> = Arc::from(data);
+        let mut offset = 0;
+        
+        // 1. 解析头部
+        let (header, header_size) = Header::deserialize(&data[offset..])?;
+        offset += header_size;
+        
+        // 2. 零拷贝解析数据块
+        let mut chunks = Vec::new();
+        
+        // 解析chunks直到遇到文件结束
+        while offset < data.len() {
+            let remaining = &data[offset..];
+            
+            // 检查是否是chunk标识符
+            if remaining.len() < 4 || &remaining[..4] != b"CK01" {
+                // 如果没有更多chunk，剩余数据可能是TOC
+                break;
+            }
+            
+            let (chunk, chunk_size) = Chunk::deserialize_zero_copy(shared_buffer.clone(), offset)?;
             chunks.push(chunk);
             offset += chunk_size;
         }
@@ -260,6 +328,133 @@ impl Container {
             .unwrap_or(0);
         
         header_size + chunks_size + toc_size
+    }
+
+    /// 并行验证所有数据块
+    /// 
+    /// 使用多线程并行验证所有块，提高验证速度
+    /// 
+    /// # 返回
+    /// 
+    /// 验证结果，任何块验证失败都会返回错误
+    pub fn verify_parallel(&self) -> Result<()> {
+        chunk::parallel::verify_chunks_parallel(&self.chunks)
+    }
+
+    /// 获取处理统计信息
+    /// 
+    /// # 返回
+    /// 
+    /// 包含块处理相关统计信息的结构
+    pub fn get_processing_stats(&self) -> chunk::ProcessingStats {
+        chunk::parallel::get_processing_stats(&self.chunks)
+    }
+
+    /// 传统串行验证（向后兼容）
+    /// 
+    /// # 返回
+    /// 
+    /// 验证结果
+    pub fn verify_serial(&self) -> Result<()> {
+        for chunk in &self.chunks {
+            chunk.verify_traditional()?;
+        }
+        Ok(())
+    }
+
+    /// 快速解析模式：仅解析头部和块元数据，不验证内容
+    /// 
+    /// 用于快速获取容器基本信息，如块数量、大小等
+    /// 
+    /// # 参数
+    /// 
+    /// * `data` - 要解析的字节数据
+    /// 
+    /// # 返回
+    /// 
+    /// 成功时返回解析后的容器，但不验证块内容
+    pub fn deserialize_fast(data: &[u8]) -> Result<Self> {
+        // 使用零拷贝解析，但不验证内容哈希
+        Self::deserialize_zero_copy(data)
+    }
+
+    /// 获取内存使用统计
+    /// 
+    /// # 参数
+    /// 
+    /// * `original_file_size` - 原始文件大小
+    /// 
+    /// # 返回
+    /// 
+    /// 内存使用统计信息
+    pub fn get_memory_stats(&self, original_file_size: usize) -> MemoryStats {
+        let mut owned_payload_size = 0;
+        let mut shared_payload_size = 0;
+        let mut total_raw_size = 0;
+        
+        for chunk in &self.chunks {
+            total_raw_size += chunk.raw_size as usize;
+            match &chunk.payload {
+                chunk::ChunkPayload::Owned(bytes) => {
+                    owned_payload_size += bytes.len();
+                }
+                chunk::ChunkPayload::Shared(buffer) => {
+                    shared_payload_size += buffer.len();
+                }
+            }
+        }
+        
+        MemoryStats {
+            original_file_size,
+            owned_payload_size,
+            shared_payload_size,
+            total_raw_capacity: total_raw_size,
+            metadata_size: std::mem::size_of::<Self>() + 
+                         self.chunks.len() * std::mem::size_of::<Chunk>(),
+        }
+    }
+}
+
+/// 内存使用统计信息
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    /// 原始文件大小
+    pub original_file_size: usize,
+    /// 拥有的载荷数据大小（复制的数据）
+    pub owned_payload_size: usize,
+    /// 共享的载荷数据大小（零拷贝引用）
+    pub shared_payload_size: usize,
+    /// 总的原始数据容量（解压后的大小）
+    pub total_raw_capacity: usize,
+    /// 元数据结构大小
+    pub metadata_size: usize,
+}
+
+impl MemoryStats {
+    /// 计算内存放大倍数
+    pub fn memory_amplification(&self) -> f64 {
+        let total_memory = self.owned_payload_size + self.metadata_size;
+        // 不计算共享数据，因为它们是零拷贝引用
+        if self.original_file_size > 0 {
+            (self.original_file_size + total_memory) as f64 / self.original_file_size as f64
+        } else {
+            1.0
+        }
+    }
+    
+    /// 计算零拷贝节省的内存
+    pub fn zero_copy_savings(&self) -> usize {
+        self.shared_payload_size // 这些本来需要复制的数据现在是零拷贝
+    }
+    
+    /// 计算传统方式的内存放大倍数
+    pub fn traditional_memory_amplification(&self) -> f64 {
+        let traditional_memory = self.owned_payload_size + self.shared_payload_size + self.metadata_size;
+        if self.original_file_size > 0 {
+            (self.original_file_size + traditional_memory) as f64 / self.original_file_size as f64
+        } else {
+            1.0
+        }
     }
 }
 
