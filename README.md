@@ -1,6 +1,11 @@
 # UNIV (Universe) 容器格式库
 
-UNIV 是一个统一的二进制容器格式的 Rust 实现，支持多种数据模式和优化策略。
+[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](https://github.com/nostalgiatan/universe)
+[![Status](https://img.shields.io/badge/status-stable-success.svg)](https://github.com/nostalgiatan/universe)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+UNIV 是一个统一的二进制容器格式的 Rust 实现，支持多种数据模式和优化策略。  
+本项目基于 **UNIV v1.0.0 正式规范**，提供完整且稳定的容器格式实现。
 
 ## 特性
 
@@ -167,7 +172,7 @@ cargo doc --open
 
 ## 规范符合性
 
-本实现严格遵循 UNIV 容器规范 v1.0-draft，包括：
+本实现严格遵循 UNIV 容器规范 v1.0.0 正式版本，包括：
 
 - 📋 魔数和Profile系统
 - 🔧 Chunk帧结构和压缩流水线
