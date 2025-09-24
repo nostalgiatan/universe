@@ -78,7 +78,7 @@ impl VarInt {
     /// # 返回
     /// 
     /// ZigZag 编码后的无符号整数
-    fn zigzag_encode(value: i64) -> u64 {
+    pub fn zigzag_encode(value: i64) -> u64 {
         ((value << 1) ^ (value >> 63)) as u64
     }
 
@@ -91,7 +91,7 @@ impl VarInt {
     /// # 返回
     /// 
     /// ZigZag 解码后的有符号整数
-    fn zigzag_decode(value: u64) -> i64 {
+    pub fn zigzag_decode(value: u64) -> i64 {
         ((value >> 1) as i64) ^ (-((value & 1) as i64))
     }
 
@@ -249,6 +249,62 @@ impl VarIntArray {
         }
         length
     }
+}
+
+/// 写入可变长无符号整数到写入器
+/// 
+/// # 参数
+/// 
+/// * `writer` - 数据写入器
+/// * `value` - 要写入的值
+/// 
+/// # 返回
+/// 
+/// 写入结果
+pub fn write_varint<W: std::io::Write>(writer: &mut W, value: u64) -> crate::error::Result<()> {
+    leb128::write::unsigned(writer, value)
+        .map(|_| ()) // Discard the number of bytes written, just return Ok(())
+        .map_err(|e| crate::error::UnivError::serialization_error(format!("可变长整数写入失败: {}", e)))
+}
+
+/// 从读取器读取可变长无符号整数
+/// 
+/// # 参数
+/// 
+/// * `reader` - 数据读取器
+/// 
+/// # 返回
+/// 
+/// 读取的值
+pub fn read_varint<R: std::io::Read>(reader: &mut R) -> crate::error::Result<u64> {
+    leb128::read::unsigned(reader)
+        .map_err(|e| crate::error::UnivError::deserialization_error(format!("可变长整数读取失败: {}", e)))
+}
+
+/// ZigZag 编码（公开版本）
+/// 
+/// # 参数
+/// 
+/// * `value` - 要编码的有符号整数
+/// 
+/// # 返回
+/// 
+/// ZigZag 编码后的无符号整数
+pub fn zigzag_encode(value: i64) -> u64 {
+    VarInt::zigzag_encode(value)
+}
+
+/// ZigZag 解码（公开版本）
+/// 
+/// # 参数
+/// 
+/// * `value` - 要解码的无符号整数
+/// 
+/// # 返回
+/// 
+/// ZigZag 解码后的有符号整数
+pub fn zigzag_decode(value: u64) -> i64 {
+    VarInt::zigzag_decode(value)
 }
 
 #[cfg(test)]
