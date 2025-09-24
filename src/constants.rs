@@ -63,18 +63,18 @@ pub mod header_ext_types {
 
 /// Chunk 类型标识
 pub mod chunk_kinds {
-    /// 数据节点
-    pub const DATA_NODE: u8 = 1;
-    /// 二进制大对象
-    pub const BLOB: u8 = 2;
-    /// Schema 定义
-    pub const SCHEMA: u8 = 3;
-    /// 字符串表
-    pub const STRING_TABLE: u8 = 4;
-    /// 索引分片
-    pub const INDEX_SHARD: u8 = 5;
-    /// 附件
-    pub const ATTACHMENT: u8 = 6;
+    /// 数据节点（按照 v1.0.0 正式规范）
+    pub const DATA_NODE: u8 = 0x00;
+    /// 二进制大对象（按照 v1.0.0 正式规范）
+    pub const BLOB: u8 = 0x01;
+    /// Schema 定义（按照 v1.0.0 正式规范）
+    pub const SCHEMA: u8 = 0x02;
+    /// 字符串表（按照 v1.0.0 正式规范）
+    pub const STRING_TABLE: u8 = 0x03;
+    /// 索引分片（按照 v1.0.0 正式规范）
+    pub const INDEX_SHARD: u8 = 0x04;
+    /// 附件（按照 v1.0.0 正式规范）
+    pub const ATTACHMENT: u8 = 0x05;
 }
 
 /// 压缩算法标识
@@ -109,14 +109,16 @@ pub mod transform_flags {
     pub const CDC: u16 = 0x80;
 }
 
-/// 哈希算法标识
+/// 哈希算法标识（按照 v1.0.0 正式规范）
 pub mod hash_algorithms {
-    /// BLAKE3-256（默认推荐）
-    pub const BLAKE3: u8 = 1;
+    /// BLAKE3-256（默认推荐，按照 v1.0.0 正式规范）
+    pub const BLAKE3: u8 = 0;
     /// SHA-256
-    pub const SHA256: u8 = 2;
+    pub const SHA256: u8 = 1;
     /// CRC32C（仅用于校验）
-    pub const CRC32C: u8 = 3;
+    pub const CRC32C: u8 = 2;
+    /// Multihash（外部引用）
+    pub const MULTIHASH: u8 = 0xFF;
 }
 
 /// 哈希策略
