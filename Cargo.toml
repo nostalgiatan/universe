@@ -17,6 +17,14 @@ path = "src/bin/cil.rs"
 name = "performance_baseline"
 path = "benches/performance_baseline.rs"
 
+[[bin]]
+name = "performance_optimized"
+path = "benches/performance_optimized.rs"
+
+[[bin]]
+name = "memory_comparison"
+path = "benches/memory_comparison.rs"
+
 [dependencies]
 clap = { version = "4.5.0", features = ["derive"] }
 anyhow = "1.0.100"
@@ -32,6 +40,9 @@ lz4_flex = "0.11.5"
 serde = { version = "1.0.226", features = ["derive"] }
 thiserror = "2.0.16"
 zstd = "0.13.3"
+rayon = "1.11.0"
+smallvec = "1.15.1"
+pulp = "0.21.5"
 
 [dev-dependencies]
 tempfile = "3.23.0"

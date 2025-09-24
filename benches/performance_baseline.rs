@@ -17,7 +17,7 @@ fn create_test_data(size: usize) -> Vec<u8> {
 fn create_test_container(chunk_count: usize, chunk_size: usize, codec: Codec) -> Container {
     let mut container = Container::new(Profile::Blob);
     
-    for i in 0..chunk_count {
+    for _i in 0..chunk_count {
         let data = create_test_data(chunk_size);
         container.add_data(
             ChunkKind::Blob,
