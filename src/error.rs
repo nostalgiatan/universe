@@ -184,3 +184,9 @@ impl UnivError {
         )
     }
 }
+
+impl From<serde_json::Error> for UnivError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::DeserializationError { reason: format!("JSON 处理错误: {}", err) }
+    }
+}
