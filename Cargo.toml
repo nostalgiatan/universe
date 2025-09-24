@@ -1,0 +1,25 @@
+[package]
+name = "universe"
+version = "1.0.0-draft"
+edition = "2021"
+license = "MIT"
+description = "UNIV 容器格式的 Rust 实现 - 统一二进制容器，支持多种数据模式"
+repository = "https://github.com/nostalgiatan/universe"
+authors = ["SSSSSNOWWWWW"]
+categories = ["encoding", "data-structures", "compression"]
+keywords = ["binary", "container", "format", "data", "serialization"]
+
+[dependencies]
+anyhow = "1.0.100"
+blake3 = "1.8.2"
+bytes = "1.10.1"
+chrono = { version = "0.4.42", features = ["serde"] }
+ciborium = "0.2.2"
+crc32c = "0.6.8"
+flate2 = "1.1.2"
+hex = "0.4.3"
+leb128 = "0.2.5"
+lz4_flex = "0.11.5"
+serde = { version = "1.0.226", features = ["derive"] }
+thiserror = "2.0.16"
+zstd = "0.13.3"
