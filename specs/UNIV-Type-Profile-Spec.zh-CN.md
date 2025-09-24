@@ -1,120 +1,117 @@
-# UNIV TYPE Profile 规范 v1.0-draft
-
-状态：Draft-1.0  
-最后更新：2025-09-23  
+# UNIV TYPE Profile 规范
+版本：1.0.0 Release  
+状态：Stable  
 许可：MIT
 
 ## 1. 目的
-集中封装命名空间、包、类型（UTI IR）、版本、依赖、签名与分发元数据，为数据 Profile 引用提供稳定与安全基础。
+TYPE Profile（魔数：`UNV1 TYPE`）是 UNIV 类型生态核心载体：组织命名空间、包、类型（UTI IR）、版本、依赖、签名与解析策略，为数据 Profile（RECD/TABL/TSDB/GRPH 等）提供稳健绑定。
 
-## 2. 允许 Chunk / 约束
-ChunkKind：Schema, StringTable, IndexShard, Attachment  
-Transform：Dict-String(建议)；禁止 Columnarize/CDC/Gorilla  
-Codec：zstd  
-必须包含清单（manifest）与 exports、deps 索引。
+## 2. 允许 Chunk
+Schema, StringTable, IndexShard, Attachment  
+禁止 DataNode / Blob（除文档附件，不参与类型哈希）
 
-## 3. 命名模式
-namespace（反向域）+ package（短名）+ type（帕斯卡）  
-URN：`urn:univ:<ns>:<pkg>:<type>[:<version>]`  
-版本：SemVer
-
-## 4. Manifest
-结构（CBOR/JSON 同步）：
+## 3. Manifest（必需）
+Attachment: `manifest.cbor`（JSON 副本可选）
 ```
 {
-  "namespace": "org.example",
-  "package": "payments",
-  "version": "1.0.0",
-  "description": "...",
-  "license": "Apache-2.0",
-  "exports": [{ "name":"Invoice", "fingerprint":hex32, "iface_fp":hex32 }],
-  "dependencies": [{
-     "namespace":"org.example",
-     "package":"identity",
-     "range":"^2.1.0",
-     "iface_fp":hex32
-  }],
-  "registry_hints": {... 与 ResolverHints 兼容 ...},
-  "signatures": [{
-     "alg":"ed25519",
-     "pub":"base64",
-     "sig":"base64",
-     "covers":"exports+dependencies"
-  }]
+ "namespace": "org.example",
+ "package": "payments",
+ "version": "1.0.0",
+ "description": "...",
+ "license": "Apache-2.0",
+ "exports": [
+   {"name":"Invoice","fingerprint":hex32,"iface_fp":hex32}
+ ],
+ "dependencies": [
+   {"namespace":"org.example","package":"identity","range":"^2.1.0","iface_fp":hex32}
+ ],
+ "registry_hints": {...ResolverHints 子集...},
+ "timestamp": int64_ns,
+ "not_before": int64_ns?,
+ "not_after": int64_ns?,
+ "signatures": [
+   {"alg":"ed25519","pub":"base64","sig":"base64","covers":"exports+dependencies+timestamp"}
+ ]
 }
 ```
+签名覆盖：exports + dependencies + timestamp + not_before/not_after（若存在）。
 
-## 5. Schema (UTI IR) 与指纹
-- 规范化 CBOR → Fingerprint = BLAKE3-256
-- 接口指纹包含默认值（防语义漂移）
-- 同类型新版本：MAJOR 不兼容变更；MINOR 可添加可选字段
+## 4. UTI IR
+见 UTI 规范；类型指纹与接口指纹均来源于规范化 CBOR。接口指纹包含默认值（语义敏感），排除注解和文档。
 
-## 6. 泛型
-`type_params`: [{"name":"T","constraints":["record","ref" ...]}]  
-实例化：生成复合指纹：hash( base_fingerprint || param_fingerprint... )
+## 5. 命名与 URN
+URN: `urn:univ:<namespace>:<package>:<type>[:<version>]`  
+版本：SemVer；MAJOR 不兼容；MINOR 可新增可选字段；PATCH 文档。
 
-## 7. 约束
-约束集合：range/pattern/unique/foreign_key/custom。  
-foreign_key 使用 JSONPath 子集；on=restrict|cascade|nullify
+## 6. 依赖解析
+优先级：内嵌 → 本地缓存 → 远程 endpoint → fallback。  
+每解析完成：cache (URN@resolved_version → fingerprint)。  
+依赖循环禁止（A↔B）；需拆出基础包 C。
 
-## 8. 外键表达
-UTI foreign_key：
+## 7. 泛型与实例化
+UTI `type_params` + 约束（kind 集合：`record|enum|scalar|ref` …）。  
+实例指纹 = blake3(base_fp || param_fp1 || param_fp2 ...)
+
+## 8. 约束
+- range / pattern / unique / foreign_key / custom
+- foreign_key JSONPath 子集（见 JSONPath EBNF）
+- on: restrict|cascade|nullify
+
+## 9. 外键
+UTI foreign_key 结构：
 ```
 {
  "type":"foreign_key",
- "src":["$.user_id"],
+ "src":["$.user_id"],    // JSONPath 子集
  "target_urn":"urn:univ:org.example:identity:User:1.0.0",
  "tgt":["$.id"],
  "on":"restrict"
 }
 ```
 
-## 9. 依赖解析
-Resolution 顺序：内嵌→缓存→远程。远程需校验：签名→接口指纹→版本范围。  
-签名策略由 ResolverHints.trust 控制。
-
-## 10. 注解空间
-`annotations`：键以命名层次，如：
-- doc.*
-- codegen.<lang>.*
-- validate.*
-- storage.*
-- security.*
-
-保留前缀：`univ.`
+## 10. 注解命名空间
+保留前缀：`univ.`；语言生成：`codegen.<lang>.`; 验证：`validate.*`; 存储策略：`storage.*`
 
 ## 11. 安全
-- Manifest 签名失败 → 拒绝
-- 超限：schema 数量、字符串表、依赖深度（默认 64）
-- 外部引用 URN 解析需防缓存投毒（指纹二次校验）
+- Manifest 必须至少一个 ed25519 签名（若 trust.requireSignature=true）
+- 依赖深度上限（默认 64）
+- 不允许匿名/空 namespace
+- 不允许未导出的内部类型被外部引用（引用需列入 exports）
 
-## 12. 工具推荐命令
-- `univ type pack`
-- `univ type publish`
-- `univ type resolve`
-- `univ type verify`
-- `univ codegen <lang>`
-- `univ data pack --profile RECD --schema urn:...`
-- `univ inspect file.unv1`
+## 12. 去重与缓存
+Key: fingerprint → bytes（不可变）  
+Cache 校验：二次计算指纹 + 接口指纹匹配
 
-## 13. 示例
-最小包：Invoice  
-数据文件引用：SchemaRef=指纹 或 URN+范围
+## 13. 字段弃用
+字段 `deprecated: true` + 注解：
+```
+annotations: {
+ "univ.deprecated_since":"1.3.0",
+ "univ.remove_in":"2.0.0"
+}
+```
+工具可发警告。
 
-## 14. 版本策略
-MINOR：新增可选字段/注解  
-PATCH：文档或非语义注解  
-MAJOR：字段删除/类型改变/约束放宽破坏兼容
+## 14. 失败代码（工具建议）
+T_OK / T_SIG_INVALID / T_VERSION_CONFLICT / T_DEP_CYCLE / T_DEP_MISSING / T_FINGERPRINT_COLLISION
 
-## 15. 返回码（工具层建议）
-- T_OK
-- T_SCHEMA_DUP
-- T_FINGERPRINT_COLLISION
-- T_SIG_INVALID
-- T_VERSION_CONFLICT
-- T_DEP_MISSING
+## 15. 演进策略摘要
+| 操作 | 允许版本级 | 备注 |
+|------|-----------|------|
+| 新增可选字段 | MINOR | 无默认值时读取端视为缺失 |
+| 新增必须字段 | MAJOR | |
+| 删除字段 | MAJOR | |
+| 更改字段类型 | MAJOR | |
+| 添加枚举成员（末尾） | MINOR | 接口指纹变更 |
+| 枚举重排序/删除 | MAJOR | |
+| 默认值改变 | MINOR（接口指纹变） | 工具应警告 |
+| 约束收紧 | MINOR | |
+| 约束放宽破坏安全 | MAJOR | |
 
-## 16. 开放点（后续版本）
-- 多语言 IDL round-trip（UTL 与 UTI 扩充宏）
-- taxonomy/ontology 标记层
-- 可组合验证表达式 DSL
+## 16. 示例最小包
+exports: [Invoice]  
+依赖：空  
+signatures: 1  
+数据文件引用：SchemaRef=Invoice 指纹
+
+TYPE Profile 规范完成。
