@@ -4,8 +4,7 @@
 
 use universe::{
     Container, Profile, Header, Chunk, ChunkKind,
-    header::HeaderExtension,
-    constants::{header_ext_types, hash_algorithms, codecs},
+    constants::hash_algorithms,
     util::hash::ContentHash,
     reference::{DataNode, ReferenceGraph},
     transform::StringDictionary,
@@ -35,6 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 7. 演示安全功能
     demo_security()?;
+    
+    // 8. 演示容器序列化功能
+    demo_container_serialization()?;
 
     println!("\n=== 示例执行完成 ===");
     Ok(())
@@ -191,8 +193,8 @@ fn demo_references() -> Result<(), Box<dyn std::error::Error>> {
     
     // 创建引用图
     let mut graph = ReferenceGraph::new();
-    let node1_id = node1.id.clone();
-    let node2_id = node2.id.clone();
+    let _node1_id = node1.id.clone();
+    let _node2_id = node2.id.clone();
     let node3_id = node3.id.clone();
     
     graph.add_node(node1)?;
@@ -291,6 +293,87 @@ fn demo_security() -> Result<(), Box<dyn std::error::Error>> {
     // 检查限制违规
     let violations = security_context.stats.check_limits(&security_context.validator);
     println!("   安全限制违规: {} 个", violations.len());
+    
+    println!();
+    Ok(())
+}
+
+/// 演示容器序列化和反序列化功能
+fn demo_container_serialization() -> Result<(), Box<dyn std::error::Error>> {
+    println!("8. 容器序列化功能演示");
+    
+    // 创建一个新容器
+    let mut container = Container::new(Profile::Recd);
+    
+    // 设置头部信息
+    container.header.set_producer("UNIV示例程序");
+    container.header.set_creation_timestamp_now();
+    
+    println!("   创建了 {:?} 类型的容器", container.header.profile);
+    
+    // 添加多种类型的数据
+    let data1 = "第一个数据块：包含中文字符的测试数据";
+    let data2 = b"Second data block: Binary data with mixed content";
+    let data3 = r#"{"type": "json", "content": "第三个数据块", "encoding": "UTF-8"}"#;
+    
+    container.add_data(
+        ChunkKind::DataNode,
+        data1.as_bytes(),
+        universe::chunk::Codec::None,
+        0,
+        hash_algorithms::BLAKE3,
+    )?;
+    
+    container.add_data(
+        ChunkKind::Blob,
+        data2,
+        universe::chunk::Codec::Zstd,
+        0,
+        hash_algorithms::BLAKE3,
+    )?;
+    
+    container.add_data(
+        ChunkKind::Schema,
+        data3.as_bytes(),
+        universe::chunk::Codec::Lz4,
+        0,
+        hash_algorithms::BLAKE3,
+    )?;
+    
+    println!("   添加了 {} 个数据块", container.chunk_count());
+    
+    // 序列化容器
+    let serialized_data = container.serialize()?;
+    println!("   序列化后大小: {} 字节", serialized_data.len());
+    println!("   估算大小: {} 字节", container.estimated_size());
+    
+    // 反序列化容器
+    let deserialized_container = Container::deserialize(&serialized_data)?;
+    
+    // 验证反序列化结果
+    println!("   反序列化成功！");
+    println!("   Profile: {:?}", deserialized_container.header.profile);
+    println!("   数据块数量: {}", deserialized_container.chunk_count());
+    println!("   生产者: {:?}", deserialized_container.header.get_producer());
+    
+    // 验证数据完整性
+    for i in 0..deserialized_container.chunk_count() {
+        let chunk = deserialized_container.get_chunk(i).unwrap();
+        let recovered_data = chunk.get_raw_data()?;
+        println!("   块 {} - 类型: {:?}, 大小: {} 字节, 压缩比: {:.2}", 
+                 i, chunk.kind, recovered_data.len(), chunk.compression_ratio());
+    }
+    
+    // 验证第一个块的内容
+    let first_chunk = deserialized_container.get_chunk(0).unwrap();
+    let recovered_data = first_chunk.get_raw_data()?;
+    let recovered_text = String::from_utf8(recovered_data.to_vec())?;
+    
+    if recovered_text == data1 {
+        println!("   ✓ 第一个数据块内容验证成功");
+    } else {
+        println!("   ✗ 第一个数据块内容验证失败");
+    }
     
     println!();
     Ok(())

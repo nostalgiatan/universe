@@ -3,7 +3,6 @@
 //! 处理 UNIV 容器的目录索引，提供快速访问和查找功能。
 
 use crate::error::{UnivError, Result};
-use crate::util::hash::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

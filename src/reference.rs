@@ -2,7 +2,7 @@
 //!
 //! 处理 UNIV 容器中的内容寻址、节点引用和外部引用功能。
 
-use crate::error::{UnivError, Result};
+use crate::error::Result;
 use crate::util::hash::{ContentHash, HashProvider};
 use crate::util::validation::CycleDetector;
 use crate::constants::hash_algorithms;

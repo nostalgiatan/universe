@@ -3,7 +3,7 @@
 //! 提供 UNIV 容器的安全验证、限制检查和保护机制。
 
 use crate::error::{UnivError, Result};
-use crate::util::validation::{SecurityValidator, CycleDetector, IntegrityValidator};
+use crate::util::validation::{SecurityValidator, CycleDetector};
 use crate::constants::security_limits;
 use std::collections::HashMap;
 

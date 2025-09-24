@@ -393,7 +393,7 @@ impl Header {
             let mut ext_len_buf = &buf[..];
             let ext_len = leb128::read::unsigned(&mut ext_len_buf)
                 .map_err(|e| UnivError::deserialization_error(format!("LEB128解码失败: {}", e)))?;
-            let len_bytes = buf.len() - ext_len_buf.len();
+            let _len_bytes = buf.len() - ext_len_buf.len();
             buf = ext_len_buf;
 
             let ext_len = ext_len as usize;

@@ -2,7 +2,7 @@
 //!
 //! 处理 UNIV 容器中的数据块，包括压缩、变换、哈希验证等功能。
 
-use crate::constants::{chunk_kinds, codecs, transform_flags, hash_algorithms, CHUNK_FRAME_HEADER_SIZE, CHUNK_FRAME_CRC_SIZE};
+use crate::constants::{chunk_kinds, codecs, CHUNK_FRAME_HEADER_SIZE, CHUNK_FRAME_CRC_SIZE};
 use crate::error::{UnivError, Result};
 use crate::util::hash::HashProvider;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -491,7 +491,7 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::hash_algorithms;
+    use crate::constants::{hash_algorithms, transform_flags};
 
     #[test]
     fn test_chunk_kind_conversion() {
