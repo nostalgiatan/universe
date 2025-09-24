@@ -4,7 +4,7 @@
 
 use crate::error::{UnivError, Result};
 use crate::constants::transform_flags;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
