@@ -450,11 +450,49 @@ impl Chunk {
         transform_flags: u16,
         hash_algorithm: u8,
     ) -> Result<Self> {
+        Self::new_with_schema_ref(kind, raw_data, codec, transform_flags, hash_algorithm, None)
+    }
+
+    /// 创建新的数据块（带 Schema 引用）
+    /// 
+    /// # 参数
+    /// 
+    /// * `kind` - 块类型
+    /// * `raw_data` - 原始数据
+    /// * `codec` - 压缩算法
+    /// * `transform_flags` - 变换标志
+    /// * `hash_algorithm` - 哈希算法
+    /// * `schema_ref` - 可选的 Schema 引用
+    /// 
+    /// # 返回
+    /// 
+    /// 新创建的数据块
+    pub fn new_with_schema_ref(
+        kind: ChunkKind,
+        raw_data: &[u8],
+        codec: Codec,
+        transform_flags: u16,
+        hash_algorithm: u8,
+        schema_ref: Option<&[u8]>,
+    ) -> Result<Self> {
         // 压缩数据
         let compressed_data = codec.compress(raw_data)?;
         
-        // 计算内容哈希（对原始数据）
-        let hash_bytes = HashProvider::hash(hash_algorithm, raw_data)?;
+        // 计算规范化内容哈希
+        let hash_bytes = if hash_algorithm == crate::constants::hash_algorithms::BLAKE3 {
+            // 使用规范化编码计算哈希
+            crate::canonical::compute_canonical_content_hash(
+                kind.to_u8(),
+                transform_flags,
+                schema_ref,
+                crate::constants::hash_policy::DATA_ONLY, // 默认使用 DATA_ONLY 策略
+                raw_data,
+            )?
+        } else {
+            // 其他算法使用传统哈希方式
+            HashProvider::hash(hash_algorithm, raw_data)?
+        };
+        
         let mut content_hash = ContentHash::new();
         content_hash.extend(hash_bytes);
 
@@ -544,15 +582,43 @@ impl Chunk {
         let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
         
         // 验证哈希
-        let computed_hash = HashProvider::hash(self.hash_algorithm, &decompressed)?;
+        self.verify_content_hash(&decompressed)?;
+
+        Ok(decompressed)
+    }
+
+    /// 验证内容哈希
+    /// 
+    /// # 参数
+    /// 
+    /// * `raw_data` - 原始数据
+    /// 
+    /// # 返回
+    /// 
+    /// 验证结果
+    fn verify_content_hash(&self, raw_data: &[u8]) -> Result<()> {
+        let computed_hash = if self.hash_algorithm == crate::constants::hash_algorithms::BLAKE3 {
+            // 使用规范化编码计算哈希（假设没有 schema ref，使用 DATA_ONLY 策略）
+            crate::canonical::compute_canonical_content_hash(
+                self.kind.to_u8(),
+                self.transform_flags,
+                None, // TODO: 从序列化数据中获取 schema_ref
+                crate::constants::hash_policy::DATA_ONLY,
+                raw_data,
+            )?
+        } else {
+            // 其他算法使用传统哈希
+            HashProvider::hash(self.hash_algorithm, raw_data)?
+        };
+        
         if computed_hash != self.content_hash.as_slice() {
             return Err(UnivError::HashMismatch {
                 expected: hex::encode(&self.content_hash),
                 actual: hex::encode(&computed_hash),
             });
         }
-
-        Ok(decompressed)
+        
+        Ok(())
     }
 
     /// 流式验证原始数据（减少内存峰值）
@@ -1223,6 +1289,78 @@ mod tests {
         println!("  级别1: {} 字节", level1.len());
         println!("  级别9: {} 字节", level9.len());
         println!("  级别19: {} 字节", level19.len());
+    }
+    
+    #[test]
+    fn test_canonical_hash_integration() {
+        // 测试相同数据使用规范化哈希的一致性
+        let test_data = b"Test data for canonical hashing";
+        
+        let chunk1 = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::None,
+            0,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        let chunk2 = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::None,
+            0,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        // 相同数据应产生相同的规范化哈希
+        assert_eq!(chunk1.content_hash, chunk2.content_hash);
+        
+        // 验证数据完整性
+        let recovered_data1 = chunk1.get_raw_data().unwrap();
+        let recovered_data2 = chunk2.get_raw_data().unwrap();
+        
+        assert_eq!(recovered_data1, test_data);
+        assert_eq!(recovered_data2, test_data);
+        
+        println!("规范化哈希集成测试通过");
+        println!("内容哈希: {}", hex::encode(&chunk1.content_hash));
+    }
+    
+    #[test]
+    fn test_canonical_vs_traditional_hash() {
+        let test_data = b"Test data for hash comparison";
+        
+        // BLAKE3 规范化哈希
+        let canonical_chunk = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::None,
+            0,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        // CRC32C 传统哈希
+        let traditional_chunk = Chunk::new(
+            ChunkKind::DataNode,
+            test_data,
+            Codec::None,
+            0,
+            hash_algorithms::CRC32C,
+        ).unwrap();
+        
+        // 哈希长度应该不同
+        assert_ne!(canonical_chunk.content_hash.len(), traditional_chunk.content_hash.len());
+        assert_eq!(canonical_chunk.content_hash.len(), 32); // BLAKE3-256
+        assert_eq!(traditional_chunk.content_hash.len(), 4);  // CRC32C
+        
+        // 数据恢复应该都正常
+        let recovered_canonical = canonical_chunk.get_raw_data().unwrap();
+        let recovered_traditional = traditional_chunk.get_raw_data().unwrap();
+        
+        assert_eq!(recovered_canonical, test_data);
+        assert_eq!(recovered_traditional, test_data);
+        
+        println!("规范化 vs 传统哈希对比测试通过");
     }
 }
 
