@@ -1,6 +1,6 @@
 [package]
 name = "universe"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "UNIV 容器格式的 Rust 实现 - 统一二进制容器，支持多种数据模式"
@@ -12,18 +12,6 @@ keywords = ["binary", "container", "format", "data", "serialization"]
 [[bin]]
 name = "cil"
 path = "src/bin/cil.rs"
-
-[[bin]]
-name = "performance_baseline"
-path = "benches/performance_baseline.rs"
-
-[[bin]]
-name = "performance_optimized"
-path = "benches/performance_optimized.rs"
-
-[[bin]]
-name = "memory_comparison"
-path = "benches/memory_comparison.rs"
 
 [dependencies]
 clap = { version = "4.5.0", features = ["derive"] }
@@ -43,6 +31,10 @@ zstd = "0.13.3"
 rayon = "1.11.0"
 smallvec = "1.15.1"
 pulp = "0.21.5"
+
+[features]
+default = ["simd"]
+simd = []
 
 [dev-dependencies]
 tempfile = "3.23.0"

@@ -705,7 +705,7 @@ checksum = "f63a545481291138910575129486daeaf8ac54aee4387fe7906919f7830c7d9d"
 
 [[package]]
 name = "universe"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "blake3",
