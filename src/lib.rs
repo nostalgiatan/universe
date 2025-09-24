@@ -48,6 +48,7 @@ pub mod profile;
 pub mod reference;
 pub mod security;
 pub mod util;
+pub mod canonical;
 
 use std::sync::Arc;
 
