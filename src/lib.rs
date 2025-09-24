@@ -10,6 +10,7 @@
 //! - 随机访问和 Schema 引用
 //! - 可演进的版本兼容策略
 //! - 安全限制和验证机制
+//! - 完整的命令行工具支持
 //!
 //! ## 基本用法
 //!
@@ -136,10 +137,7 @@ impl Container {
             // TOC 现在是直接的 CBOR 数据，不是以 "TOC1" 开头
             // 尝试解析剩余数据为 TOC
             if !remaining.is_empty() {
-                match toc::Toc::deserialize(remaining) {
-                    Ok(toc) => Some(toc),
-                    Err(_) => None, // 如果解析失败，表示没有TOC
-                }
+                toc::Toc::deserialize(remaining).ok()
             } else {
                 None
             }
