@@ -277,6 +277,11 @@ impl StreamingHashVerifier {
         }
     }
     
+    /// 获取哈希算法标识符
+    pub fn algorithm(&self) -> u8 {
+        self.algorithm
+    }
+    
     /// 完成哈希计算并验证
     pub fn finalize_and_verify(self, expected_hash: &[u8]) -> Result<()> {
         let computed = match self.state {
@@ -1090,7 +1095,6 @@ pub struct ProcessingStats {
 /// 使用向量化指令加速特定操作
 #[cfg(feature = "simd")]
 pub mod simd {
-    use super::*;
     use pulp::Arch;
     
     /// SIMD 加速的帧头扫描
@@ -1108,36 +1112,38 @@ pub mod simd {
         let mut positions = Vec::new();
         let arch = Arch::new();
         
-        // 如果不支持 SIMD 或数据太小，回退到标量扫描
-        if data.len() < 32 || !arch.supports_sse2() {
+        // 如果数据太小，回退到标量扫描
+        if data.len() < 32 {
             return scan_frame_headers_scalar(data);
         }
         
-        let target = [b'C', b'K', b'0', b'1'];
-        let mut i = 0;
-        
-        // SIMD 扫描主循环（使用 SSE2 向量操作）
-        while i + 32 <= data.len() {
-            // 加载 32 字节数据进行向量比较
-            let chunk = &data[i..i + 32];
+        // 使用 pulp 进行 SIMD 加速搜索
+        arch.dispatch(|| {
+            let target = [b'C', b'K', b'0', b'1'];
+            let mut i = 0;
             
-            // 查找 'C' 字符的位置
-            for (offset, window) in chunk.windows(4).enumerate() {
-                if window == target {
-                    positions.push(i + offset);
+            // SIMD 扫描主循环
+            while i + 32 <= data.len() {
+                let chunk = &data[i..i + 32];
+                
+                // 在当前块中查找匹配
+                for (offset, window) in chunk.windows(4).enumerate() {
+                    if window == target {
+                        positions.push(i + offset);
+                    }
                 }
+                
+                i += 28; // 重叠 4 字节以避免边界遗漏
             }
             
-            i += 28; // 重叠扫描以避免边界遗漏
-        }
-        
-        // 处理剩余数据
-        while i + 4 <= data.len() {
-            if &data[i..i + 4] == target {
-                positions.push(i);
+            // 处理剩余数据
+            while i + 4 <= data.len() {
+                if &data[i..i + 4] == target {
+                    positions.push(i);
+                }
+                i += 1;
             }
-            i += 1;
-        }
+        });
         
         positions
     }

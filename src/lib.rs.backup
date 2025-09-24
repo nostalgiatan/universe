@@ -1,7 +1,7 @@
-//! # UNIV (Universe) 容器格式库 v1.1.0
+//! # UNIV (Universe) 容器格式库
 //!
 //! UNIV 是一个统一的二进制容器格式，支持多种数据模式和优化策略。
-//! 本实现严格遵循 UNIV 容器规范 v1.1.0，提供跨平台SIMD加速和统一API设计。
+//! 本实现严格遵循 UNIV 容器规范 v1.0.0 正式版本。
 //! 
 //! ## 特性
 //! 
@@ -12,22 +12,23 @@
 //! - 可演进的版本兼容策略
 //! - 安全限制和验证机制
 //! - 完整的命令行工具支持
-//! - 跨平台SIMD微并发加速
-//! - 统一简化的API入口
 //!
-//! ## 基本用法（v1.1.0 简化API）
+//! ## 基本用法
 //!
 //! ```rust
-//! use universe::{Container, Profile, ChunkKind};
+//! use universe::{Container, Profile};
 //! 
 //! // 创建一个新的 RECD 类型容器
 //! let mut container = Container::new(Profile::Recd);
 //! 
-//! // 使用简化API添加数据（自动选择最佳设置）
-//! container.add_data_simple(ChunkKind::DataNode, b"test data").unwrap();
-//! 
-//! // 统一验证接口（支持并行验证）
-//! container.verify(true).unwrap();
+//! // 添加数据到容器
+//! container.add_data(
+//!     universe::ChunkKind::DataNode,
+//!     b"test data",
+//!     universe::chunk::Codec::None,
+//!     0, // transform flags
+//!     universe::constants::hash_algorithms::BLAKE3
+//! ).unwrap();
 //! 
 //! // 序列化到字节流
 //! let bytes = container.serialize().unwrap();
@@ -94,6 +95,24 @@ impl Container {
 
     /// 从字节流反序列化容器
     /// 
+    /// 统一的反序列化入口点，支持性能优化和零拷贝选项
+    /// 
+    /// # 参数
+    /// 
+    /// * `data` - 要解析的字节数据
+    /// * `zero_copy` - 是否使用零拷贝优化（可选）
+    /// 
+    /// # 返回
+    /// 
+    /// 成功时返回解析后的容器，失败时返回错误
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        Self::deserialize_with_options(data, false)
+    }
+
+    /// 零拷贝反序列化容器（性能优化版本）
+    /// 
+    /// 使用共享缓冲区避免压缩数据的重复复制，显著减少内存开销
+    /// 
     /// # 参数
     /// 
     /// * `data` - 要解析的字节数据
@@ -101,7 +120,14 @@ impl Container {
     /// # 返回
     /// 
     /// 成功时返回解析后的容器，失败时返回错误
-    pub fn deserialize(data: &[u8]) -> Result<Self> {
+    pub fn deserialize_zero_copy(data: &[u8]) -> Result<Self> {
+        Self::deserialize_with_options(data, true)
+    }
+
+    /// 通用反序列化实现（减少重复代码）
+    fn deserialize_with_options(data: &[u8], zero_copy: bool) -> Result<Self> {
+    /// 通用反序列化实现（减少重复代码）
+    fn deserialize_with_options(data: &[u8], zero_copy: bool) -> Result<Self> {
         if data.is_empty() {
             return Err(UnivError::IncompleteData { 
                 expected: 1, 
@@ -118,92 +144,39 @@ impl Container {
         // 2. 解析数据块
         let mut chunks = Vec::new();
         
-        // 解析chunks直到遇到文件结束
-        while offset < data.len() {
-            let remaining = &data[offset..];
+        if zero_copy {
+            // 创建共享缓冲区用于零拷贝
+            let shared_buffer: Arc<[u8]> = Arc::from(data);
             
-            // 检查是否是chunk标识符
-            if remaining.len() < 4 || &remaining[..4] != b"CK01" {
-                // 如果没有更多chunk，剩余数据可能是TOC
-                break;
-            }
-            
-            let (chunk, chunk_size) = Chunk::deserialize(remaining)?;
-            chunks.push(chunk);
-            offset += chunk_size;
-        }
-        
-        // 3. 解析TOC（如果存在）
-        let toc = if offset < data.len() {
-            let remaining = &data[offset..];
-            // TOC 现在是直接的 CBOR 数据，不是以 "TOC1" 开头
-            // 尝试解析剩余数据为 TOC
-            if !remaining.is_empty() {
-                toc::Toc::deserialize(remaining).ok()
-            } else {
-                None
+            while offset < data.len() {
+                let remaining = &data[offset..];
+                
+                if remaining.len() < 4 || &remaining[..4] != b"CK01" {
+                    break;
+                }
+                
+                let (chunk, chunk_size) = Chunk::deserialize_zero_copy(shared_buffer.clone(), offset)?;
+                chunks.push(chunk);
+                offset += chunk_size;
             }
         } else {
-            None
-        };
-        
-        Ok(Self {
-            header,
-            chunks,
-            toc,
-        })
-    }
-
-    /// 零拷贝反序列化容器（性能优化版本）
-    /// 
-    /// 使用共享缓冲区避免压缩数据的重复复制，显著减少内存开销
-    /// 
-    /// # 参数
-    /// 
-    /// * `data` - 要解析的字节数据
-    /// 
-    /// # 返回
-    /// 
-    /// 成功时返回解析后的容器，失败时返回错误
-    pub fn deserialize_zero_copy(data: &[u8]) -> Result<Self> {
-        if data.is_empty() {
-            return Err(UnivError::IncompleteData { 
-                expected: 1, 
-                actual: 0 
-            });
-        }
-        
-        // 创建共享缓冲区
-        let shared_buffer: Arc<[u8]> = Arc::from(data);
-        let mut offset = 0;
-        
-        // 1. 解析头部
-        let (header, header_size) = Header::deserialize(&data[offset..])?;
-        offset += header_size;
-        
-        // 2. 零拷贝解析数据块
-        let mut chunks = Vec::new();
-        
-        // 解析chunks直到遇到文件结束
-        while offset < data.len() {
-            let remaining = &data[offset..];
-            
-            // 检查是否是chunk标识符
-            if remaining.len() < 4 || &remaining[..4] != b"CK01" {
-                // 如果没有更多chunk，剩余数据可能是TOC
-                break;
+            // 标准反序列化
+            while offset < data.len() {
+                let remaining = &data[offset..];
+                
+                if remaining.len() < 4 || &remaining[..4] != b"CK01" {
+                    break;
+                }
+                
+                let (chunk, chunk_size) = Chunk::deserialize(remaining)?;
+                chunks.push(chunk);
+                offset += chunk_size;
             }
-            
-            let (chunk, chunk_size) = Chunk::deserialize_zero_copy(shared_buffer.clone(), offset)?;
-            chunks.push(chunk);
-            offset += chunk_size;
         }
         
         // 3. 解析TOC（如果存在）
         let toc = if offset < data.len() {
             let remaining = &data[offset..];
-            // TOC 现在是直接的 CBOR 数据，不是以 "TOC1" 开头
-            // 尝试解析剩余数据为 TOC
             if !remaining.is_empty() {
                 toc::Toc::deserialize(remaining).ok()
             } else {
@@ -256,7 +229,7 @@ impl Container {
         self.chunks.push(chunk);
     }
 
-    /// 创建并添加数据块
+    /// 创建并添加数据块（完整参数版本）
     /// 
     /// # 参数
     /// 
@@ -366,6 +339,8 @@ impl Container {
     /// 并行验证所有数据块
     /// 
     /// 使用多线程并行验证所有块，提高验证速度
+    /// 
+    /// # 返回
     /// 验证容器完整性
     /// 
     /// 统一的验证入口点，支持并行和串行验证
@@ -390,20 +365,9 @@ impl Container {
 
     /// 并行验证容器完整性（向后兼容方法）
     /// 
-    /// # 返回
-    /// 
     /// 验证结果，任何块验证失败都会返回错误
     pub fn verify_parallel(&self) -> Result<()> {
         self.verify(true)
-    }
-
-    /// 获取处理统计信息
-    /// 
-    /// # 返回
-    /// 
-    /// 包含块处理相关统计信息的结构
-    pub fn get_processing_stats(&self) -> chunk::ProcessingStats {
-        chunk::parallel::get_processing_stats(&self.chunks)
     }
 
     /// 传统串行验证（向后兼容）
@@ -415,20 +379,13 @@ impl Container {
         self.verify(false)
     }
 
-    /// 快速解析模式：仅解析头部和块元数据，不验证内容
-    /// 
-    /// 用于快速获取容器基本信息，如块数量、大小等
-    /// 
-    /// # 参数
-    /// 
-    /// * `data` - 要解析的字节数据
+    /// 获取处理统计信息
     /// 
     /// # 返回
     /// 
-    /// 成功时返回解析后的容器，但不验证块内容
-    pub fn deserialize_fast(data: &[u8]) -> Result<Self> {
-        // 使用零拷贝解析，但不验证内容哈希
-        Self::deserialize_zero_copy(data)
+    /// 包含块处理相关统计信息的结构
+    pub fn get_processing_stats(&self) -> chunk::ProcessingStats {
+        chunk::parallel::get_processing_stats(&self.chunks)
     }
 
     /// 获取内存使用统计

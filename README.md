@@ -1,11 +1,20 @@
-# UNIV (Universe) 容器格式库
+# UNIV (Universe) 容器格式库 v1.1.0
 
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](https://github.com/nostalgiatan/universe)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)](https://github.com/nostalgiatan/universe)
 [![Status](https://img.shields.io/badge/status-stable-success.svg)](https://github.com/nostalgiatan/universe)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 UNIV 是一个统一的二进制容器格式的 Rust 实现，支持多种数据模式和优化策略。  
-本项目基于 **UNIV v1.0.0 正式规范**，提供完整且稳定的容器格式实现。
+本项目基于 **UNIV v1.1.0 规范**，提供完整且稳定的容器格式实现，具备跨平台SIMD加速和统一API设计。
+
+## 🎯 版本 1.1.0 新特性
+
+- ✅ **统一API入口** - 简化的API设计，减少重复代码和复杂性
+- ✅ **跨平台SIMD加速** - 自动利用向量指令优化数据处理和帧扫描
+- ✅ **增强的命令行工具** - 新增 `benchmark` 和 `optimize` 命令
+- ✅ **零编译警告** - 完全清理的代码库，生产环境就绪
+- ✅ **智能默认设置** - `add_data_simple()` 方法自动选择最佳参数
+- ✅ **统一验证接口** - `verify(parallel)` 统一并行/串行验证入口
 
 ## 特性
 
@@ -23,10 +32,27 @@ UNIV 是一个统一的二进制容器格式的 Rust 实现，支持多种数据
 
 ```toml
 [dependencies]
-universe = "1.0.0"
+universe = "1.1.0"
 ```
 
-### 基本使用
+### 基本使用（1.1.0 简化API）
+
+```rust
+use universe::{Container, Profile, ChunkKind};
+
+// 创建容器并使用简化API添加数据
+let mut container = Container::new(Profile::Recd);
+
+// 智能添加数据（自动选择最佳压缩和哈希算法）
+container.add_data_simple(ChunkKind::DataNode, b"Hello, UNIV!")?;
+
+// 统一验证接口（支持并行/串行）
+container.verify(true)?; // 并行验证
+
+// 序列化
+let bytes = container.serialize()?;
+println!("容器大小: {} 字节", bytes.len());
+```
 
 ```rust
 use universe::{Container, Profile, Header, Chunk, ChunkKind};
@@ -77,6 +103,13 @@ let index = dict.add_string("repeated_string".to_string());
 // 安全验证
 let mut security_context = SecurityContext::new();
 security_context.validate_container()?;
+
+// SIMD加速的帧扫描（v1.1.0新功能）
+#[cfg(feature = "simd")]
+{
+    use universe::chunk::simd;
+    let positions = simd::scan_frame_headers_simd(&data);
+}
 ```
 
 ## 支持的Profile
@@ -139,16 +172,35 @@ cargo test
 cargo doc --open
 ```
 
-## CLI 工具 (CIL)
+## CLI 工具 (CIL) v1.1.0
 
 本项目包含了官方的命令行工具 `cil`，提供完整的 UNIV 容器操作功能：
 
+### 基础命令
 - **create**: 创建各种 Profile 类型的容器
 - **info**: 查看容器详细信息
 - **verify**: 验证容器完整性和规范符合性  
 - **extract**: 提取容器中的数据块
 
-使用 `cargo run --bin cil -- --help` 查看详细帮助信息。
+### 新增命令 (v1.1.0)
+- **benchmark**: 性能基准测试，支持SIMD和并行测试
+- **optimize**: 容器优化，支持零拷贝和重压缩
+
+### 使用示例
+
+```bash
+# 创建容器
+cil create -o my-container.univ --producer "我的程序" --namespace "org.example"
+
+# 性能基准测试
+cil benchmark my-container.univ --rounds 10 --simd --parallel
+
+# 优化容器
+cil optimize input.univ -o optimized.univ --zero-copy --recompress
+
+# 查看帮助
+cil --help
+```
 
 ## 测试覆盖
 

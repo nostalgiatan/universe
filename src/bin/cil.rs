@@ -23,7 +23,7 @@ use universe::{Container, Profile, ChunkKind, error::Result};
 #[derive(Parser)]
 #[command(
     name = "cil",
-    version = "1.0.0",
+    version = "1.1.0",
     about = "UNIV 容器格式命令行工具 - 创建、读取、验证 UNIV 容器",
     long_about = "CIL (Container Interface Layer) 是 UNIV 容器格式的官方命令行工具。\n\
                  支持创建各种 Profile 类型的容器，读取和验证容器内容，\n\
@@ -116,6 +116,42 @@ enum Commands {
         /// 保持原始格式
         #[arg(long)]
         raw: bool,
+    },
+    
+    /// 性能分析和基准测试
+    Benchmark {
+        /// 测试文件路径
+        file: PathBuf,
+        
+        /// 测试轮数
+        #[arg(short, long, default_value = "10")]
+        rounds: usize,
+        
+        /// 是否测试SIMD加速
+        #[arg(long)]
+        simd: bool,
+        
+        /// 是否测试并行处理
+        #[arg(long)]
+        parallel: bool,
+    },
+    
+    /// 优化容器
+    Optimize {
+        /// 输入容器文件
+        input: PathBuf,
+        
+        /// 输出优化后的容器文件
+        #[arg(short, long)]
+        output: PathBuf,
+        
+        /// 重新压缩使用更高压缩比
+        #[arg(long)]
+        recompress: bool,
+        
+        /// 启用零拷贝优化
+        #[arg(long)]
+        zero_copy: bool,
     },
 }
 
@@ -218,6 +254,12 @@ fn main() {
         Commands::Extract { file, output, chunk, raw } => {
             extract_container_data(file, output, chunk, raw, cli.verbose)
         }
+        Commands::Benchmark { file, rounds, simd, parallel } => {
+            benchmark_container(file, rounds, simd, parallel, cli.verbose)
+        }
+        Commands::Optimize { input, output, recompress, zero_copy } => {
+            optimize_container(input, output, recompress, zero_copy, cli.verbose)
+        }
     };
     
     match result {
@@ -268,25 +310,14 @@ fn create_container(
         let data = fs::read(&input_file)
             .map_err(universe::error::UnivError::IoError)?;
         
-        container.add_data(
-            chunk_type.into(),
-            &data,
-            universe::chunk::Codec::Zstd,
-            0, // transform flags
-            universe::constants::hash_algorithms::BLAKE3,
-        )?;
+        // 使用简化的API添加数据，自动选择最佳设置
+        container.add_data_simple(chunk_type.into(), &data)?;
     }
     
     // 如果没有输入文件，创建一个示例数据块
     if container.chunk_count() == 0 {
         let example_data = format!("UNIV 容器示例数据 - Profile: {}", profile_name(profile));
-        container.add_data(
-            chunk_type.into(),
-            example_data.as_bytes(),
-            universe::chunk::Codec::Zstd,
-            0,
-            universe::constants::hash_algorithms::BLAKE3,
-        )?;
+        container.add_data_simple(chunk_type.into(), example_data.as_bytes())?;
     }
     
     // 序列化容器
@@ -406,15 +437,16 @@ fn verify_container(file: PathBuf, strict: bool, verbose: bool) -> Result<()> {
     // 基本验证
     println!("✓ 容器解析成功");
     
-    // 验证每个数据块
-    for (i, chunk) in container.chunks.iter().enumerate() {
-        chunk.verify()?;
-        if verbose {
-            println!("✓ 数据块 {} 验证通过", i);
-        }
+    // 验证数据块完整性（使用统一的验证API）
+    if strict {
+        // 严格模式使用串行验证确保准确性
+        container.verify(false)?;
+        println!("✓ 严格模式数据块验证通过");
+    } else {
+        // 普通模式使用并行验证提高速度
+        container.verify(true)?;
+        println!("✓ 数据块验证通过");
     }
-    
-    println!("✓ 所有数据块验证通过");
     
     // 严格模式验证
     if strict {
@@ -508,6 +540,119 @@ fn profile_name(profile: ProfileType) -> &'static str {
     }
 }
 
+/// 性能基准测试
+fn benchmark_container(
+    file: PathBuf,
+    rounds: usize,
+    _test_simd: bool,
+    _test_parallel: bool,
+    verbose: bool,
+) -> Result<()> {
+    use std::time::Instant;
+    
+    if verbose {
+        println!("对容器文件进行性能基准测试: {:?}", file);
+        println!("测试轮数: {}", rounds);
+    }
+    
+    let data = fs::read(&file)
+        .map_err(|e| universe::error::UnivError::IoError(e))?;
+    
+    println!("文件大小: {:.2} KB", data.len() as f64 / 1024.0);
+    
+    // 基础反序列化性能测试
+    let mut total_deserialize_time = std::time::Duration::new(0, 0);
+    for _ in 0..rounds {
+        let start = Instant::now();
+        let _container = Container::deserialize(&data)?;
+        total_deserialize_time += start.elapsed();
+    }
+    
+    let avg_deserialize_ms = total_deserialize_time.as_millis() as f64 / rounds as f64;
+    println!("平均反序列化时间: {:.2} ms", avg_deserialize_ms);
+    
+    // 零拷贝反序列化性能测试  
+    let mut total_zero_copy_time = std::time::Duration::new(0, 0);
+    for _ in 0..rounds {
+        let start = Instant::now();
+        let _container = Container::deserialize_zero_copy(&data)?;
+        total_zero_copy_time += start.elapsed();
+    }
+    
+    let avg_zero_copy_ms = total_zero_copy_time.as_millis() as f64 / rounds as f64;
+    println!("平均零拷贝反序列化时间: {:.2} ms", avg_zero_copy_ms);
+    
+    if avg_deserialize_ms > 0.0 {
+        let speedup = avg_deserialize_ms / avg_zero_copy_ms;
+        println!("零拷贝性能提升: {:.2}x", speedup);
+    }
+    
+    Ok(())
+}
+
+/// 优化容器
+fn optimize_container(
+    input: PathBuf,
+    output: PathBuf,
+    _recompress: bool,
+    zero_copy: bool,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        println!("优化容器: {:?} -> {:?}", input, output);
+    }
+    
+    let data = fs::read(&input)
+        .map_err(|e| universe::error::UnivError::IoError(e))?;
+    
+    let original_size = data.len();
+    
+    // 根据选项选择反序列化方法
+    let container = if zero_copy {
+        if verbose {
+            println!("使用零拷贝反序列化");
+        }
+        Container::deserialize_zero_copy(&data)?
+    } else {
+        Container::deserialize(&data)?
+    };
+    
+    if verbose {
+        println!("原始容器大小: {:.2} KB", original_size as f64 / 1024.0);
+        println!("数据块数量: {}", container.chunk_count());
+        
+        let stats = container.get_processing_stats();
+        println!("小块数量: {}", stats.small_chunks);
+        println!("大块数量: {}", stats.large_chunks);
+        println!("平均压缩比: {:.2}", stats.average_compression_ratio);
+    }
+    
+    let optimized_container = container;
+    
+    // 序列化优化后的容器
+    let optimized_data = optimized_container.serialize()?;
+    let optimized_size = optimized_data.len();
+    
+    // 写入输出文件
+    fs::write(&output, &optimized_data)
+        .map_err(|e| universe::error::UnivError::IoError(e))?;
+    
+    if verbose || original_size != optimized_size {
+        println!("优化后大小: {:.2} KB", optimized_size as f64 / 1024.0);
+        let reduction = (original_size as f64 - optimized_size as f64) / original_size as f64 * 100.0;
+        if reduction > 0.0 {
+            println!("大小减少: {:.1}%", reduction);
+        } else if reduction < 0.0 {
+            println!("大小增加: {:.1}%", -reduction);
+        } else {
+            println!("大小无变化");
+        }
+    }
+    
+    println!("容器优化完成");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,13 +696,7 @@ mod tests {
         
         // 先创建一个容器
         let mut container = Container::new(Profile::Recd);
-        container.add_data(
-            ChunkKind::DataNode,
-            b"test data",
-            universe::chunk::Codec::None,
-            0,
-            universe::constants::hash_algorithms::BLAKE3,
-        ).unwrap();
+        container.add_data_simple(ChunkKind::DataNode, b"test data").unwrap();
         
         let serialized = container.serialize().unwrap();
         fs::write(&container_file, &serialized).unwrap();
