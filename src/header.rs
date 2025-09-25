@@ -73,7 +73,7 @@ impl Header {
         Self {
             profile,
             major_version: 1,
-            minor_version: 0,
+            minor_version: 1, // 更新为 v1.1.0 规范
             flags: 0,
             extensions: HashMap::new(),
         }
@@ -554,7 +554,7 @@ mod tests {
         let header = Header::new(Profile::Recd);
         assert_eq!(header.profile, Profile::Recd);
         assert_eq!(header.major_version, 1);
-        assert_eq!(header.minor_version, 0);
+        assert_eq!(header.minor_version, 1); // 更新为 v1.1.0 规范
         assert_eq!(header.flags, 0);
     }
 

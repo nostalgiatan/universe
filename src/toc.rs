@@ -3,8 +3,11 @@
 //! 处理 UNIV 容器的目录索引，提供快速访问和查找功能。
 
 use crate::error::{UnivError, Result};
+use crate::constants::TOC_MAGIC;
+use crate::util::varint::VarInt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use bytes::{Buf, BufMut, BytesMut};
 
 /// TOC 目录结构
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,7 +205,7 @@ impl Toc {
             .collect()
     }
 
-    /// 序列化 TOC 结构
+    /// 序列化 TOC 结构为 CBOR 格式（内部格式）
     /// 
     /// # 返回
     /// 
@@ -214,7 +217,37 @@ impl Toc {
         Ok(buf)
     }
 
-    /// 反序列化 TOC 结构
+    /// 序列化 TOC Footer（规范格式）
+    /// 
+    /// 根据 UNIV 规范生成 "TOC1" Footer 格式：
+    /// Magic4("TOC1") + ShardCount(varint) + ShardOffsets[ShardCount](uint64) + CRC32C(uint32)
+    /// 
+    /// # 返回
+    /// 
+    /// 序列化后的 Footer 字节数据
+    pub fn serialize_footer(&self) -> Result<Vec<u8>> {
+        let mut buf = BytesMut::new();
+        
+        // 写入魔数 "TOC1"
+        buf.put_slice(TOC_MAGIC);
+        
+        // 写入分片数量（varint）
+        let shard_count_bytes = VarInt::encode_u64(self.shard_count as u64)?;
+        buf.put_slice(&shard_count_bytes);
+        
+        // 写入分片偏移量列表（uint64 数组）
+        for offset in &self.shard_offsets {
+            buf.put_u64_le(*offset);
+        }
+        
+        // 计算并写入 CRC32C
+        let crc = crc32c::crc32c(&buf);
+        buf.put_u32_le(crc);
+        
+        Ok(buf.to_vec())
+    }
+
+    /// 反序列化 TOC 结构（CBOR 格式）
     /// 
     /// # 参数
     /// 
@@ -226,6 +259,74 @@ impl Toc {
     pub fn deserialize(data: &[u8]) -> Result<Self> {
         ciborium::de::from_reader(data)
             .map_err(|e| UnivError::deserialization_error(format!("TOC反序列化失败: {}", e)))
+    }
+
+    /// 反序列化 TOC Footer（规范格式）
+    /// 
+    /// 解析 "TOC1" Footer 格式：
+    /// Magic4("TOC1") + ShardCount(varint) + ShardOffsets[ShardCount](uint64) + CRC32C(uint32)
+    /// 
+    /// # 参数
+    /// 
+    /// * `data` - Footer 字节数据
+    /// 
+    /// # 返回
+    /// 
+    /// 解析后的分片偏移量信息和消耗的字节数
+    pub fn deserialize_footer(data: &[u8]) -> Result<(Vec<u64>, usize)> {
+        if data.len() < 8 {
+            return Err(UnivError::IncompleteData {
+                expected: 8,
+                actual: data.len(),
+            });
+        }
+
+        let mut buf = data;
+        let original_len = buf.len();
+
+        // 验证魔数 "TOC1"
+        let mut magic = [0u8; 4];
+        buf.copy_to_slice(&mut magic);
+        if &magic != TOC_MAGIC {
+            return Err(UnivError::deserialization_error("无效的TOC Footer魔数".to_string()));
+        }
+
+        // 读取分片数量（varint）
+        let (shard_count, varint_len) = VarInt::decode_u64(buf)?;
+        buf = &buf[varint_len..];
+
+        // 读取分片偏移量列表
+        let mut shard_offsets = Vec::with_capacity(shard_count as usize);
+        for _ in 0..shard_count {
+            if buf.len() < 8 {
+                return Err(UnivError::IncompleteData {
+                    expected: 8,
+                    actual: buf.len(),
+                });
+            }
+            shard_offsets.push(buf.get_u64_le());
+        }
+
+        // 验证 CRC32C
+        if buf.len() < 4 {
+            return Err(UnivError::IncompleteData {
+                expected: 4,
+                actual: buf.len(),
+            });
+        }
+        let expected_crc = buf.get_u32_le();
+        let footer_data_len = original_len - buf.len() - 4; // 不包括CRC本身
+        let computed_crc = crc32c::crc32c(&data[..footer_data_len]);
+        
+        if expected_crc != computed_crc {
+            return Err(UnivError::deserialization_error(format!(
+                "TOC Footer CRC校验失败: 期望{:08x}, 实际{:08x}",
+                expected_crc, computed_crc
+            )));
+        }
+
+        let consumed = original_len - buf.len();
+        Ok((shard_offsets, consumed))
     }
 }
 
@@ -336,5 +437,43 @@ mod tests {
         
         assert_eq!(deserialized.roots.len(), 1);
         assert_eq!(deserialized.get_root("main"), Some(&"node1".to_string()));
+    }
+
+    #[test]
+    fn test_toc_footer_serialization() {
+        let mut toc = Toc::new();
+        toc.shard_count = 2;
+        toc.shard_offsets = vec![0x1000, 0x2000];
+        
+        // 序列化 Footer
+        let footer_data = toc.serialize_footer().unwrap();
+        
+        // 验证魔数
+        assert_eq!(&footer_data[0..4], b"TOC1");
+        
+        // 反序列化 Footer
+        let (shard_offsets, consumed) = Toc::deserialize_footer(&footer_data).unwrap();
+        assert_eq!(consumed, footer_data.len());
+        assert_eq!(shard_offsets.len(), 2);
+        assert_eq!(shard_offsets[0], 0x1000);
+        assert_eq!(shard_offsets[1], 0x2000);
+    }
+
+    #[test]
+    fn test_toc_footer_crc_validation() {
+        let mut toc = Toc::new();
+        toc.shard_count = 1;
+        toc.shard_offsets = vec![0x1000];
+        
+        let mut footer_data = toc.serialize_footer().unwrap();
+        
+        // 损坏 CRC 数据
+        let last_idx = footer_data.len() - 1;
+        footer_data[last_idx] ^= 0xFF;
+        
+        // 反序列化应该失败
+        let result = Toc::deserialize_footer(&footer_data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("CRC校验失败"));
     }
 }
