@@ -12,10 +12,12 @@
 use crate::constants::{chunk_kinds, codecs, CHUNK_FRAME_HEADER_SIZE, CHUNK_FRAME_CRC_SIZE};
 use crate::error::{UnivError, Result};
 use crate::util::hash::HashProvider;
+use crate::transform::DataTransformer;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use smallvec::SmallVec;
+use sha2::{Sha256, Digest};
 
 /// Chunk 类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,7 +317,7 @@ pub struct StreamingHashVerifier {
 
 enum StreamingHashState {
     Blake3(blake3::Hasher),
-    // 预留其他算法支持
+    Sha256(Sha256),
 }
 
 impl StreamingHashVerifier {
@@ -324,6 +326,9 @@ impl StreamingHashVerifier {
         let state = match algorithm {
             crate::constants::hash_algorithms::BLAKE3 => {
                 StreamingHashState::Blake3(blake3::Hasher::new())
+            }
+            crate::constants::hash_algorithms::SHA256 => {
+                StreamingHashState::Sha256(Sha256::new())
             }
             _ => return Err(UnivError::UnsupportedHashAlgorithm { algorithm }),
         };
@@ -335,6 +340,9 @@ impl StreamingHashVerifier {
     pub fn update(&mut self, data: &[u8]) {
         match &mut self.state {
             StreamingHashState::Blake3(hasher) => {
+                hasher.update(data);
+            },
+            StreamingHashState::Sha256(hasher) => {
                 hasher.update(data);
             },
         }
@@ -349,6 +357,7 @@ impl StreamingHashVerifier {
     pub fn finalize_and_verify(self, expected_hash: &[u8]) -> Result<()> {
         let computed = match self.state {
             StreamingHashState::Blake3(hasher) => hasher.finalize().as_bytes().to_vec(),
+            StreamingHashState::Sha256(hasher) => hasher.finalize().to_vec(),
         };
         
         if computed != expected_hash {
@@ -475,10 +484,21 @@ impl Chunk {
         hash_algorithm: u8,
         schema_ref: Option<&[u8]>,
     ) -> Result<Self> {
-        // 压缩数据
-        let compressed_data = codec.compress(raw_data)?;
+        // 记录原始数据大小（变换前大小）
+        let original_raw_size = raw_data.len() as u32;
         
-        // 计算规范化内容哈希
+        // 应用数据变换（如果有变换标志）
+        let transformed_data = if transform_flags != 0 {
+            let transformer = DataTransformer::new(transform_flags);
+            transformer.apply(raw_data)?
+        } else {
+            raw_data.to_vec()
+        };
+        
+        // 压缩变换后的数据
+        let compressed_data = codec.compress(&transformed_data)?;
+        
+        // 计算规范化内容哈希（基于原始数据，符合语义）
         let hash_bytes = if hash_algorithm == crate::constants::hash_algorithms::BLAKE3 {
             // 使用规范化编码计算哈希
             crate::canonical::compute_canonical_content_hash(
@@ -486,7 +506,7 @@ impl Chunk {
                 transform_flags,
                 schema_ref,
                 crate::constants::hash_policy::DATA_ONLY, // 默认使用 DATA_ONLY 策略
-                raw_data,
+                raw_data, // 使用原始数据计算哈希
             )?
         } else {
             // 其他算法使用传统哈希方式
@@ -500,7 +520,7 @@ impl Chunk {
             kind,
             codec,
             transform_flags,
-            raw_size: raw_data.len() as u32,
+            raw_size: original_raw_size, // 变换前的原始大小
             compressed_size: compressed_data.len() as u32,
             hash_algorithm,
             content_hash,
@@ -576,15 +596,23 @@ impl Chunk {
     /// 
     /// # 返回
     /// 
-    /// 解压缩后的原始数据
+    /// 解压缩并逆变换后的原始数据
     pub fn get_raw_data(&self) -> Result<Vec<u8>> {
         let payload_data = self.payload.as_slice();
         let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
         
-        // 验证哈希
-        self.verify_content_hash(&decompressed)?;
+        // 如果有变换标志，需要逆向变换以获取原始数据
+        let raw_data = if self.transform_flags != 0 {
+            let transformer = DataTransformer::new(self.transform_flags);
+            transformer.reverse(&decompressed)?
+        } else {
+            decompressed
+        };
+        
+        // 验证哈希（基于原始数据）
+        self.verify_content_hash(&raw_data)?;
 
-        Ok(decompressed)
+        Ok(raw_data)
     }
 
     /// 验证内容哈希
@@ -627,51 +655,19 @@ impl Chunk {
     pub fn verify_streaming(&self) -> Result<()> {
         let payload_data = self.payload.as_slice();
         
-        // 创建流式哈希验证器
-        let mut verifier = StreamingHashVerifier::new(self.hash_algorithm)?;
-        
-        // 对于大块，使用流式解压+哈希
+        // 对于大块，需要先解压再验证，因为需要支持规范化编码
         if self.raw_size > 64 * 1024 {
-            self.decompress_and_hash_streaming(payload_data, &mut verifier)?;
+            // 使用传统验证方法避免复杂的流式规范化编码
+            let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
+            self.verify_content_hash(&decompressed)
         } else {
             // 小块直接解压验证
             let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
-            verifier.update(&decompressed);
+            self.verify_content_hash(&decompressed)
         }
-        
-        verifier.finalize_and_verify(&self.content_hash)
     }
     
     /// 流式解压和哈希计算
-    fn decompress_and_hash_streaming(&self, payload_data: &[u8], verifier: &mut StreamingHashVerifier) -> Result<()> {
-        match self.codec {
-            Codec::None => {
-                verifier.update(payload_data);
-            }
-            Codec::Zstd => {
-                // 使用 zstd 流式解压
-                use std::io::Read;
-                let mut decoder = zstd::stream::read::Decoder::new(payload_data)?;
-                let mut buffer = vec![0u8; 8192]; // 8KB 缓冲区
-                
-                loop {
-                    let bytes_read = decoder.read(&mut buffer)
-                        .map_err(|e| UnivError::compression_error(format!("Zstd流式解压失败: {}", e)))?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    verifier.update(&buffer[..bytes_read]);
-                }
-            }
-            _ => {
-                // 对于其他压缩算法，回退到标准解压
-                let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
-                verifier.update(&decompressed);
-            }
-        }
-        Ok(())
-    }
-
     /// 序列化块到字节流（包含帧结构）
     /// 
     /// # 返回
@@ -1055,7 +1051,7 @@ impl Chunk {
     /// 块的结构开销分析
     pub fn get_structural_overhead(&self) -> StructuralOverhead {
         let header_size = CHUNK_FRAME_HEADER_SIZE;
-        let hash_size = 1 + self.content_hash.len() + 2; // hash_alg + len + hash_bytes + len_field
+        let hash_size = 1 + self.content_hash.len(); // hash_len(1B) + hash_bytes
         let crc_size = CHUNK_FRAME_CRC_SIZE;
         let total_metadata_size = header_size + hash_size + crc_size;
         
@@ -1171,6 +1167,29 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_sha256_verification() {
+        let data = b"SHA-256 chunk test data";
+        let chunk = Chunk::new(
+            ChunkKind::DataNode,
+            data,
+            Codec::None,
+            0,
+            hash_algorithms::SHA256,
+        ).unwrap();
+
+        // 验证内容哈希长度为32字节
+        assert_eq!(chunk.content_hash.len(), 32);
+
+        // 正常验证应该成功
+        assert!(chunk.verify().is_ok());
+
+        // 修改内容哈希后验证应该失败
+        let mut corrupted_chunk = chunk.clone();
+        corrupted_chunk.content_hash[0] ^= 0xFF;
+        assert!(corrupted_chunk.verify().is_err());
+    }
+
+    #[test]
     fn test_compression_ratio() {
         let data = vec![0u8; 1000]; // 大量重复数据，压缩率应该很高
         let chunk = Chunk::new(
@@ -1183,6 +1202,30 @@ mod tests {
 
         let ratio = chunk.compression_ratio();
         assert!(ratio > 1.0); // 压缩率应该大于1
+    }
+
+    #[test]
+    fn test_chunk_with_transformations() {
+        let data = b"Original test data for transformation";
+        
+        // 创建使用字典字符串变换的块
+        let chunk = Chunk::new(
+            ChunkKind::DataNode,
+            data,
+            Codec::None,
+            crate::constants::transform_flags::DICT_STRING,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        // 验证 raw_size 记录的是变换前的大小
+        assert_eq!(chunk.raw_size, data.len() as u32);
+        
+        // 获取原始数据应该能正确逆变换
+        let recovered_data = chunk.get_raw_data().unwrap();
+        assert_eq!(recovered_data, data);
+        
+        // 验证应该成功
+        assert!(chunk.verify().is_ok());
     }
 
     #[test]

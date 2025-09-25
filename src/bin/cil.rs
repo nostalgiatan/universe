@@ -914,6 +914,9 @@ fn optimize_container(
     
     if verbose || original_size != optimized_size {
         println!("优化后大小: {:.2} KB", optimized_size as f64 / 1024.0);
+        if recompress {
+            println!("压缩后负载总大小: {:.2} KB", total_final_compressed as f64 / 1024.0);
+        }
         let reduction = (original_size as f64 - optimized_size as f64) / original_size as f64 * 100.0;
         if reduction > 0.0 {
             println!("大小减少: {:.1}%", reduction);
