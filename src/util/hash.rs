@@ -5,6 +5,7 @@
 use crate::constants::hash_algorithms;
 use crate::error::{UnivError, Result};
 use blake3;
+use sha2::{Sha256, Digest};
 use serde::{Deserialize, Serialize};
 
 /// 哈希提供者，支持多种哈希算法
@@ -28,15 +29,10 @@ impl HashProvider {
                 Ok(hash.as_bytes().to_vec())
             }
             hash_algorithms::SHA256 => {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                
-                // 注意：这里应该使用真正的SHA256实现
-                // 为了简化依赖，暂时使用默认哈希器作为占位
-                let mut hasher = DefaultHasher::new();
-                data.hash(&mut hasher);
-                let hash_value = hasher.finish();
-                Ok(hash_value.to_le_bytes().to_vec())
+                let mut hasher = Sha256::new();
+                hasher.update(data);
+                let result = hasher.finalize();
+                Ok(result.to_vec())
             }
             hash_algorithms::CRC32C => {
                 let crc = crc32c::crc32c(data);
@@ -271,6 +267,26 @@ mod tests {
         
         assert_eq!(hash.len(), 4);
         assert!(HashProvider::verify_hash(hash_algorithms::CRC32C, data, &hash).is_ok());
+    }
+
+    #[test]
+    fn test_sha256_hash() {
+        let data = b"SHA-256 test data";
+        let hash = HashProvider::hash(hash_algorithms::SHA256, data).unwrap();
+        
+        // SHA-256 应该产生32字节哈希
+        assert_eq!(hash.len(), 32);
+        
+        // 验证哈希
+        assert!(HashProvider::verify_hash(hash_algorithms::SHA256, data, &hash).is_ok());
+        
+        // 验证错误数据应该失败
+        let wrong_data = b"Wrong data";
+        assert!(HashProvider::verify_hash(hash_algorithms::SHA256, wrong_data, &hash).is_err());
+        
+        // 验证SHA-256的确定性（相同输入产生相同输出）
+        let hash2 = HashProvider::hash(hash_algorithms::SHA256, data).unwrap();
+        assert_eq!(hash, hash2);
     }
 
     #[test]

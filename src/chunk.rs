@@ -16,6 +16,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use smallvec::SmallVec;
+use sha2::{Sha256, Digest};
 
 /// Chunk 类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,7 +316,7 @@ pub struct StreamingHashVerifier {
 
 enum StreamingHashState {
     Blake3(blake3::Hasher),
-    // 预留其他算法支持
+    Sha256(Sha256),
 }
 
 impl StreamingHashVerifier {
@@ -324,6 +325,9 @@ impl StreamingHashVerifier {
         let state = match algorithm {
             crate::constants::hash_algorithms::BLAKE3 => {
                 StreamingHashState::Blake3(blake3::Hasher::new())
+            }
+            crate::constants::hash_algorithms::SHA256 => {
+                StreamingHashState::Sha256(Sha256::new())
             }
             _ => return Err(UnivError::UnsupportedHashAlgorithm { algorithm }),
         };
@@ -335,6 +339,9 @@ impl StreamingHashVerifier {
     pub fn update(&mut self, data: &[u8]) {
         match &mut self.state {
             StreamingHashState::Blake3(hasher) => {
+                hasher.update(data);
+            },
+            StreamingHashState::Sha256(hasher) => {
                 hasher.update(data);
             },
         }
@@ -349,6 +356,7 @@ impl StreamingHashVerifier {
     pub fn finalize_and_verify(self, expected_hash: &[u8]) -> Result<()> {
         let computed = match self.state {
             StreamingHashState::Blake3(hasher) => hasher.finalize().as_bytes().to_vec(),
+            StreamingHashState::Sha256(hasher) => hasher.finalize().to_vec(),
         };
         
         if computed != expected_hash {
@@ -627,51 +635,19 @@ impl Chunk {
     pub fn verify_streaming(&self) -> Result<()> {
         let payload_data = self.payload.as_slice();
         
-        // 创建流式哈希验证器
-        let mut verifier = StreamingHashVerifier::new(self.hash_algorithm)?;
-        
-        // 对于大块，使用流式解压+哈希
+        // 对于大块，需要先解压再验证，因为需要支持规范化编码
         if self.raw_size > 64 * 1024 {
-            self.decompress_and_hash_streaming(payload_data, &mut verifier)?;
+            // 使用传统验证方法避免复杂的流式规范化编码
+            let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
+            self.verify_content_hash(&decompressed)
         } else {
             // 小块直接解压验证
             let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
-            verifier.update(&decompressed);
+            self.verify_content_hash(&decompressed)
         }
-        
-        verifier.finalize_and_verify(&self.content_hash)
     }
     
     /// 流式解压和哈希计算
-    fn decompress_and_hash_streaming(&self, payload_data: &[u8], verifier: &mut StreamingHashVerifier) -> Result<()> {
-        match self.codec {
-            Codec::None => {
-                verifier.update(payload_data);
-            }
-            Codec::Zstd => {
-                // 使用 zstd 流式解压
-                use std::io::Read;
-                let mut decoder = zstd::stream::read::Decoder::new(payload_data)?;
-                let mut buffer = vec![0u8; 8192]; // 8KB 缓冲区
-                
-                loop {
-                    let bytes_read = decoder.read(&mut buffer)
-                        .map_err(|e| UnivError::compression_error(format!("Zstd流式解压失败: {}", e)))?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    verifier.update(&buffer[..bytes_read]);
-                }
-            }
-            _ => {
-                // 对于其他压缩算法，回退到标准解压
-                let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
-                verifier.update(&decompressed);
-            }
-        }
-        Ok(())
-    }
-
     /// 序列化块到字节流（包含帧结构）
     /// 
     /// # 返回
@@ -1160,6 +1136,29 @@ mod tests {
             0,
             hash_algorithms::BLAKE3,
         ).unwrap();
+
+        // 正常验证应该成功
+        assert!(chunk.verify().is_ok());
+
+        // 修改内容哈希后验证应该失败
+        let mut corrupted_chunk = chunk.clone();
+        corrupted_chunk.content_hash[0] ^= 0xFF;
+        assert!(corrupted_chunk.verify().is_err());
+    }
+
+    #[test]
+    fn test_chunk_sha256_verification() {
+        let data = b"SHA-256 chunk test data";
+        let chunk = Chunk::new(
+            ChunkKind::DataNode,
+            data,
+            Codec::None,
+            0,
+            hash_algorithms::SHA256,
+        ).unwrap();
+
+        // 验证内容哈希长度为32字节
+        assert_eq!(chunk.content_hash.len(), 32);
 
         // 正常验证应该成功
         assert!(chunk.verify().is_ok());
