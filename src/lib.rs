@@ -369,7 +369,7 @@ impl Container {
     /// 使用多线程并行验证所有块，提高验证速度
     /// 验证容器完整性
     /// 
-    /// 统一的验证入口点，支持并行和串行验证
+    /// 统一的验证入口点，支持并行和串行验证，集成安全限制检查
     /// 
     /// # 参数
     /// 
@@ -379,6 +379,30 @@ impl Container {
     /// 
     /// 验证成功返回Ok，失败返回错误信息
     pub fn verify(&self, parallel: bool) -> Result<()> {
+        // 创建安全上下文并收集统计信息
+        let mut security_context = crate::security::SecurityContext::new();
+        security_context.stats.chunk_count = self.chunks.len() as u32;
+        security_context.stats.total_raw_size = self.chunks.iter()
+            .map(|c| c.raw_size as u64)
+            .sum();
+        security_context.stats.total_compressed_size = self.chunks.iter()
+            .map(|c| c.compressed_size as u64)
+            .sum();
+
+        // 执行安全验证
+        security_context.validate_container()?;
+
+        // 创建攻击检测器
+        let mut attack_detector = crate::security::AttackDetector::new();
+        attack_detector.detect_excessive_chunks(self.chunks.len() as u32)?;
+
+        // 验证每个块的安全限制
+        for chunk in &self.chunks {
+            security_context.validate_chunk(chunk.raw_size, chunk.compressed_size)?;
+            attack_detector.detect_compression_bomb(chunk.compressed_size, chunk.raw_size)?;
+        }
+
+        // 执行块内容验证
         if parallel {
             chunk::parallel::verify_chunks_parallel(&self.chunks)
         } else {

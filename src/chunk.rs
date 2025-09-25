@@ -12,6 +12,7 @@
 use crate::constants::{chunk_kinds, codecs, CHUNK_FRAME_HEADER_SIZE, CHUNK_FRAME_CRC_SIZE};
 use crate::error::{UnivError, Result};
 use crate::util::hash::HashProvider;
+use crate::transform::DataTransformer;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -483,10 +484,21 @@ impl Chunk {
         hash_algorithm: u8,
         schema_ref: Option<&[u8]>,
     ) -> Result<Self> {
-        // 压缩数据
-        let compressed_data = codec.compress(raw_data)?;
+        // 记录原始数据大小（变换前大小）
+        let original_raw_size = raw_data.len() as u32;
         
-        // 计算规范化内容哈希
+        // 应用数据变换（如果有变换标志）
+        let transformed_data = if transform_flags != 0 {
+            let transformer = DataTransformer::new(transform_flags);
+            transformer.apply(raw_data)?
+        } else {
+            raw_data.to_vec()
+        };
+        
+        // 压缩变换后的数据
+        let compressed_data = codec.compress(&transformed_data)?;
+        
+        // 计算规范化内容哈希（基于原始数据，符合语义）
         let hash_bytes = if hash_algorithm == crate::constants::hash_algorithms::BLAKE3 {
             // 使用规范化编码计算哈希
             crate::canonical::compute_canonical_content_hash(
@@ -494,7 +506,7 @@ impl Chunk {
                 transform_flags,
                 schema_ref,
                 crate::constants::hash_policy::DATA_ONLY, // 默认使用 DATA_ONLY 策略
-                raw_data,
+                raw_data, // 使用原始数据计算哈希
             )?
         } else {
             // 其他算法使用传统哈希方式
@@ -508,7 +520,7 @@ impl Chunk {
             kind,
             codec,
             transform_flags,
-            raw_size: raw_data.len() as u32,
+            raw_size: original_raw_size, // 变换前的原始大小
             compressed_size: compressed_data.len() as u32,
             hash_algorithm,
             content_hash,
@@ -584,15 +596,23 @@ impl Chunk {
     /// 
     /// # 返回
     /// 
-    /// 解压缩后的原始数据
+    /// 解压缩并逆变换后的原始数据
     pub fn get_raw_data(&self) -> Result<Vec<u8>> {
         let payload_data = self.payload.as_slice();
         let decompressed = self.codec.decompress(payload_data, Some(self.raw_size as usize))?;
         
-        // 验证哈希
-        self.verify_content_hash(&decompressed)?;
+        // 如果有变换标志，需要逆向变换以获取原始数据
+        let raw_data = if self.transform_flags != 0 {
+            let transformer = DataTransformer::new(self.transform_flags);
+            transformer.reverse(&decompressed)?
+        } else {
+            decompressed
+        };
+        
+        // 验证哈希（基于原始数据）
+        self.verify_content_hash(&raw_data)?;
 
-        Ok(decompressed)
+        Ok(raw_data)
     }
 
     /// 验证内容哈希
@@ -1182,6 +1202,30 @@ mod tests {
 
         let ratio = chunk.compression_ratio();
         assert!(ratio > 1.0); // 压缩率应该大于1
+    }
+
+    #[test]
+    fn test_chunk_with_transformations() {
+        let data = b"Original test data for transformation";
+        
+        // 创建使用字典字符串变换的块
+        let chunk = Chunk::new(
+            ChunkKind::DataNode,
+            data,
+            Codec::None,
+            crate::constants::transform_flags::DICT_STRING,
+            hash_algorithms::BLAKE3,
+        ).unwrap();
+        
+        // 验证 raw_size 记录的是变换前的大小
+        assert_eq!(chunk.raw_size, data.len() as u32);
+        
+        // 获取原始数据应该能正确逆变换
+        let recovered_data = chunk.get_raw_data().unwrap();
+        assert_eq!(recovered_data, data);
+        
+        // 验证应该成功
+        assert!(chunk.verify().is_ok());
     }
 
     #[test]
