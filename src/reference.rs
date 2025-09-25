@@ -68,18 +68,23 @@ impl NodeReference {
     /// 
     /// 新创建的外部引用
     pub fn external(urn: String) -> Result<Self> {
-        // 生成外部引用的multihash
+        // 对URN进行SHA-256哈希
         let urn_bytes = urn.as_bytes();
         let sha256_hash = HashProvider::hash(hash_algorithms::SHA256, urn_bytes)?;
-        let multihash = sha256_hash; // 简化实现，实际应该使用multihash格式
         
-        let target_id = hex::encode(&multihash);
+        // 手动创建multihash编码: code(0x12) + len(32) + digest
+        let mut multihash_bytes = Vec::with_capacity(34);
+        multihash_bytes.push(0x12); // SHA-256 code
+        multihash_bytes.push(0x20); // 32 bytes length
+        multihash_bytes.extend_from_slice(&sha256_hash);
+        
+        let target_id = hex::encode(&multihash_bytes);
         
         Ok(Self {
             target_id,
             ref_type: ReferenceType::External,
-            hash_algorithm: hash_algorithms::SHA256,
-            content_hash: multihash,
+            hash_algorithm: hash_algorithms::MULTIHASH,
+            content_hash: multihash_bytes,
             urn: Some(urn),
         })
     }
@@ -440,6 +445,24 @@ mod tests {
         // 添加外部引用
         node2.add_external_reference("urn:univ:org.example:Test:1.0.0".to_string()).unwrap();
         assert_eq!(node2.get_external_references().len(), 1);
+    }
+
+    #[test]
+    fn test_external_reference_multihash() {
+        let urn = "urn:univ:org.example:Test:1.0.0".to_string();
+        let external_ref = NodeReference::external(urn.clone()).unwrap();
+        
+        // 验证外部引用使用MULTIHASH算法
+        assert_eq!(external_ref.hash_algorithm, hash_algorithms::MULTIHASH);
+        assert_eq!(external_ref.ref_type, ReferenceType::External);
+        assert_eq!(external_ref.urn, Some(urn));
+        
+        // 验证multihash编码长度（code + len + digest = 1 + 1 + 32 = 34字节）
+        assert_eq!(external_ref.content_hash.len(), 34);
+        
+        // 验证multihash前缀：0x12 (SHA-256 code) + 0x20 (32 bytes length)  
+        assert_eq!(external_ref.content_hash[0], 0x12); // SHA-256代码
+        assert_eq!(external_ref.content_hash[1], 0x20); // 32字节长度
     }
 
     #[test]

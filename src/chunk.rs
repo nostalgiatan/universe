@@ -1031,7 +1031,7 @@ impl Chunk {
     /// 块的结构开销分析
     pub fn get_structural_overhead(&self) -> StructuralOverhead {
         let header_size = CHUNK_FRAME_HEADER_SIZE;
-        let hash_size = 1 + self.content_hash.len() + 2; // hash_alg + len + hash_bytes + len_field
+        let hash_size = 1 + self.content_hash.len(); // hash_len(1B) + hash_bytes
         let crc_size = CHUNK_FRAME_CRC_SIZE;
         let total_metadata_size = header_size + hash_size + crc_size;
         

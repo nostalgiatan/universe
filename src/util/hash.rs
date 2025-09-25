@@ -80,6 +80,7 @@ impl HashProvider {
             hash_algorithms::BLAKE3 => Ok(32), // BLAKE3-256
             hash_algorithms::SHA256 => Ok(32), // SHA-256
             hash_algorithms::CRC32C => Ok(4),  // CRC32C
+            hash_algorithms::MULTIHASH => Ok(34), // Multihash for SHA-256: 1+1+32 = code+len+digest
             unknown => Err(UnivError::UnsupportedHashAlgorithm { algorithm: unknown }),
         }
     }
@@ -98,6 +99,7 @@ impl HashProvider {
             hash_algorithms::BLAKE3 => "BLAKE3-256",
             hash_algorithms::SHA256 => "SHA-256",
             hash_algorithms::CRC32C => "CRC32C",
+            hash_algorithms::MULTIHASH => "Multihash",
             _ => "Unknown",
         }
     }
@@ -112,7 +114,7 @@ impl HashProvider {
     /// 
     /// 如果适合内容验证返回true，否则返回false
     pub fn is_cryptographic(algorithm: u8) -> bool {
-        matches!(algorithm, hash_algorithms::BLAKE3 | hash_algorithms::SHA256)
+        matches!(algorithm, hash_algorithms::BLAKE3 | hash_algorithms::SHA256 | hash_algorithms::MULTIHASH)
     }
 }
 
